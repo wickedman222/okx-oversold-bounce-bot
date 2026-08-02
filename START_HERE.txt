@@ -1,0 +1,33 @@
+OVERSOLD BOUNCE BOT — START HERE
+================================
+
+RULES (locked in):
+  - Exactly $50 USDT margin PER TRADE (not a % of balance)
+  - Only 1 trade open at a time
+  - Phase 1: Telegram signals only
+  - MEXC API keys: leave empty until Phase 2 → set on Railway Variables tab
+
+TELEGRAM:
+  Hardcoded in config.py (your bot + chat). No Railway var required.
+
+RAILWAY DEPLOY:
+  1. Push this folder to GitHub
+  2. Railway → New Project → Deploy from GitHub
+  3. Wait for Active + "scanner online" Telegram message
+  4. Full steps: open RAILWAY.md
+
+OPTIONAL VARIABLES (Railway → Variables):
+  POSITION_SIZE_USD=50
+  SCAN_INTERVAL_SEC=180
+  MIN_CONFIDENCE=68
+
+LATER (auto-trade):
+  MEXC_API_KEY=...
+  MEXC_API_SECRET=...
+  AUTO_TRADE=true   (only after executor.py is implemented)
+
+LOCAL TEST:
+  python -m venv .venv
+  .\.venv\Scripts\Activate.ps1
+  pip install -r requirements.txt
+  python main.py
