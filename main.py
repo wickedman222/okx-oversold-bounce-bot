@@ -1,22 +1,12 @@
 #!/usr/bin/env python3
 """
-Liquid Oversold Bounce — Phase 1 Signal Bot
-===========================================
+Liquid Oversold Bounce — Signal + optional MEXC auto-trade
+==========================================================
 
-Continuous loop:
-  1. Load top liquid MEXC USDT-M pairs
-  2. If conceptual trade lock is free → scan for high-conviction LONG setups
-  3. Send one Telegram signal max (best confidence if multiple)
-  4. Lock until SL/TP2 or max lock hours
-  5. Sleep SCAN_INTERVAL_SEC and repeat
-
-Run from this directory:
-  python main.py
-
-Env:
-  DRY_RUN=true          — print signals, no Telegram
-  LOG_LEVEL=DEBUG
-  AUTO_TRADE=false      — keep false until Phase 2 is implemented
+- FIXED $50 USDT margin per trade (POSITION_SIZE_USD)
+- Max 1 open trade
+- AUTO_TRADE=true + MEXC keys → live isolated orders with SL/TP triggers
+- AUTO_TRADE=false → Telegram signals only
 """
 
 from __future__ import annotations
@@ -31,18 +21,18 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-# Ensure project root on path
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config
 from bot.exchange import MarketData
-from bot.executor import build_executor
+from bot.executor import MexcExecutor, build_executor, format_trade_opened
 from bot.indicators import rsi
 from bot.scanner import Signal, evaluate_pair
 from bot.signal_log import append_signal
 from bot.telegram_notifier import (
+    send_plain,
     send_signal,
     send_status,
     send_trade_closed,
@@ -50,9 +40,6 @@ from bot.telegram_notifier import (
 )
 from bot.trade_state import OpenSignal, TradeState
 
-# -----------------------------------------------------------------------------
-# Logging
-# -----------------------------------------------------------------------------
 Path(config.LOG_DIR).mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL.upper(), logging.INFO),
@@ -67,15 +54,44 @@ log = logging.getLogger("bot.main")
 
 
 def pick_best(signals: list[Signal]) -> Signal:
-    """One trade at a time → only the highest confidence setup."""
     return max(signals, key=lambda s: (s.confidence, s.rr_tp2, -s.atr_pct))
 
 
-def check_active_release(md: MarketData, state: TradeState) -> None:
+def manage_open_trade(
+    md: MarketData,
+    state: TradeState,
+    executor: MexcExecutor,
+) -> None:
+    """While locked: sync live position or release signal-only lock on price."""
     if not state.active:
         return
-    symbol = state.active.symbol
-    # Max age handled inside is_locked / clear
+    trade = state.active
+    symbol = trade.symbol
+
+    log.info(
+        "In-trade lock: %s | age=%.1fh | entry=%.6g | auto=%s",
+        symbol,
+        trade.age_hours(),
+        trade.entry,
+        trade.auto_trade,
+    )
+
+    if trade.auto_trade and executor.keys_ok:
+        reason = executor.sync_open_trade(trade)
+        if reason == "tp1_partial":
+            state.save()
+            send_status(f"TP1 partial on {symbol} — runner left, SL→breakeven")
+            return
+        if reason in ("exchange_flat", "stop_hit", "tp2_hit"):
+            px = md.last_price(symbol)
+            state.clear_active(reason)
+            send_trade_closed(symbol, reason, px)
+            return
+        # still open — persist any remaining qty updates
+        state.save()
+        return
+
+    # Signal-only conceptual lock
     price = md.last_price(symbol)
     if price is None:
         return
@@ -85,17 +101,13 @@ def check_active_release(md: MarketData, state: TradeState) -> None:
         log.info("Released via price: %s on %s", reason, symbol)
 
 
-def scan_once(md: MarketData, state: TradeState) -> None:
-    # Refresh lock expiry
+def scan_once(
+    md: MarketData,
+    state: TradeState,
+    executor: MexcExecutor,
+) -> None:
     if state.is_locked():
-        assert state.active is not None
-        log.info(
-            "In-trade lock: %s | age=%.1fh | entry=%.6g",
-            state.active.symbol,
-            state.active.age_hours(),
-            state.active.entry,
-        )
-        check_active_release(md, state)
+        manage_open_trade(md, state, executor)
         return
 
     symbols = md.list_liquid_usdt_swaps()
@@ -103,7 +115,6 @@ def scan_once(md: MarketData, state: TradeState) -> None:
         log.warning("Empty watchlist")
         return
 
-    # BTC filter RSI
     btc_rsi = None
     if config.BTC_FILTER_ENABLED:
         btc_df = md.fetch_ohlcv_df(
@@ -168,11 +179,49 @@ def scan_once(md: MarketData, state: TradeState) -> None:
         best.leverage,
     )
 
+    # Always notify Telegram of the setup
     if not send_signal(best):
-        log.error("Telegram failed — not locking trade state")
+        log.error("Telegram failed — abort open this cycle")
         return
 
     append_signal(best)
+
+    # ---- LIVE OPEN ----
+    if executor.enabled:
+        result = executor.place_signal(best)
+        log.info("Executor result ok=%s reason=%s", result.get("ok"), result.get("reason"))
+        if not result.get("ok"):
+            send_status(
+                f"❌ AUTO OPEN FAILED {best.symbol}\n"
+                f"{result.get('reason', 'unknown')}\n"
+                f"Signal was sent — manage manually or wait for next setup."
+            )
+            # Still lock conceptually so we don't spam opens on failure loops
+            # Only lock if reason is position_already_open; otherwise allow retry next scan
+            if result.get("reason") == "position_already_open":
+                state.open_signal(
+                    OpenSignal(
+                        symbol=best.symbol,
+                        direction=best.direction,
+                        entry=best.entry,
+                        stop=best.stop,
+                        tp1=best.tp1,
+                        tp2=best.tp2,
+                        tp3=best.tp3,
+                        leverage=best.leverage,
+                        confidence=best.confidence,
+                        reason_short="blocked_existing_pos",
+                        auto_trade=True,
+                    )
+                )
+            return
+
+        trade: OpenSignal = result["trade"]
+        state.open_signal(trade)
+        send_plain(format_trade_opened(best, trade))
+        return
+
+    # ---- SIGNAL ONLY ----
     state.open_signal(
         OpenSignal(
             symbol=best.symbol,
@@ -185,21 +234,13 @@ def scan_once(md: MarketData, state: TradeState) -> None:
             leverage=best.leverage,
             confidence=best.confidence,
             reason_short="; ".join(best.reasons[:3]),
+            auto_trade=False,
+            margin_usd=config.POSITION_SIZE_USD,
         )
     )
 
-    # Phase 2 hook (stub unless AUTO_TRADE + keys + implemented)
-    executor = build_executor()
-    if executor.enabled:
-        result = executor.place_signal(best)
-        log.info("Executor result: %s", result)
-
 
 def start_health_server() -> None:
-    """
-    Railway injects PORT and health-checks the service.
-    Bind a tiny HTTP server so the deploy stays alive while the scan loop runs.
-    """
     port = int(os.environ.get("PORT", str(config.PORT)))
 
     class Handler(BaseHTTPRequestHandler):
@@ -217,7 +258,7 @@ def start_health_server() -> None:
             self.wfile.write(body)
 
         def log_message(self, format, *args):  # noqa: A003
-            return  # silence access logs
+            return
 
     def _serve() -> None:
         try:
@@ -232,7 +273,7 @@ def start_health_server() -> None:
 
 def main() -> None:
     log.info("=" * 60)
-    log.info("Oversold Bounce Signal Bot starting")
+    log.info("Oversold Bounce Bot starting")
     log.info(
         "FIXED margin=$%.0f USDT per trade | max_open=%d | lev=%d–%d | scan=%ss",
         config.POSITION_SIZE_USD,
@@ -245,27 +286,48 @@ def main() -> None:
         "dry_run=%s | auto_trade=%s | mexc_keys=%s",
         config.DRY_RUN,
         config.AUTO_TRADE,
-        "set" if (config.MEXC_API_KEY and config.MEXC_API_SECRET) else "not set (signal-only OK)",
+        "set" if (config.MEXC_API_KEY and config.MEXC_API_SECRET) else "NOT SET",
     )
     log.info("Telegram chat=%s", config.TELEGRAM_CHAT_ID)
     log.info("=" * 60)
 
-    # Railway requires something listening on PORT
     start_health_server()
 
     if not test_connection():
-        log.error("Telegram connection failed — fix token/chat id and retry")
+        log.error("Telegram connection failed")
         if not config.DRY_RUN:
             sys.exit(1)
 
+    executor = build_executor()
+    bal = executor.fetch_balance_usdt() if executor.keys_ok else None
+    mode = "LIVE AUTO-TRADE" if executor.enabled else "SIGNAL-ONLY"
+    bal_txt = f"${bal:.2f} free USDT" if bal is not None else "n/a"
+
     try:
         send_status(
-            f"Oversold Bounce scanner online "
-            f"({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC). "
-            f"FIXED ${config.POSITION_SIZE_USD:.0f} USDT per trade, 1 open max, signal-only."
+            f"Oversold Bounce online ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC)\n"
+            f"Mode: {mode}\n"
+            f"Fixed ${config.POSITION_SIZE_USD:.0f}/trade | 1 open max\n"
+            f"Balance peek: {bal_txt}"
         )
     except Exception:
         pass
+
+    if config.AUTO_TRADE and not executor.keys_ok:
+        log.error("AUTO_TRADE=true but MEXC keys missing — refusing to run live")
+        send_status("⚠️ AUTO_TRADE=true but MEXC keys missing. Set keys or set AUTO_TRADE=false.")
+        sys.exit(1)
+
+    if executor.enabled and bal is not None and bal < config.POSITION_SIZE_USD:
+        log.warning(
+            "Free USDT $%.2f < position size $%.0f — opens may fail",
+            bal,
+            config.POSITION_SIZE_USD,
+        )
+        send_status(
+            f"⚠️ Free balance ${bal:.2f} is below ${config.POSITION_SIZE_USD:.0f} margin. "
+            f"Top up futures wallet or opens will fail."
+        )
 
     md = MarketData()
     state = TradeState()
@@ -279,7 +341,7 @@ def main() -> None:
     while True:
         cycle_start = time.time()
         try:
-            scan_once(md, state)
+            scan_once(md, state, executor)
             consecutive_failures = 0
         except KeyboardInterrupt:
             log.info("Stopped by user")

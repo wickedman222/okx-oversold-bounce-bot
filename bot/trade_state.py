@@ -1,13 +1,8 @@
 """
-Persistent "already-in-trade" lock + per-pair cooldowns.
+Persistent trade lock + per-pair cooldowns.
 
-Phase 1 has no exchange positions — this is a *conceptual* lock so the bot
-never spams a second signal while one setup is still "open".
-
-Release methods:
-  1. Price hits SL or TP2 (auto, if enabled)
-  2. Max lock age (TRADE_LOCK_MAX_HOURS)
-  3. Manual: delete trade_state.json or set active=null
+Phase 2: stores live MEXC position metadata when auto_trade=True.
+Release: exchange flat, SL/TP2 price, max lock age, or manual clear.
 """
 
 from __future__ import annotations
@@ -37,6 +32,17 @@ class OpenSignal:
     confidence: float
     opened_at: float = field(default_factory=time.time)
     reason_short: str = ""
+    # Live trade fields (Phase 2)
+    contracts: float = 0.0
+    contracts_remaining: float = 0.0
+    margin_usd: float = 0.0
+    notional_usd: float = 0.0
+    entry_order_id: str = ""
+    sl_order_id: str = ""
+    tp1_order_id: str = ""
+    tp2_order_id: str = ""
+    tp1_done: bool = False
+    auto_trade: bool = False
 
     def age_hours(self) -> float:
         return (time.time() - self.opened_at) / 3600.0
@@ -54,7 +60,7 @@ class TradeState:
     def __init__(self, path: str = config.STATE_FILE):
         self.path = Path(path)
         self.active: Optional[OpenSignal] = None
-        self.cooldowns: dict[str, float] = {}  # symbol -> unix expiry
+        self.cooldowns: dict[str, float] = {}
         self.load()
 
     def load(self) -> None:
@@ -66,8 +72,9 @@ class TradeState:
                 self.active = OpenSignal.from_dict(data["active"])
             self.cooldowns = {k: float(v) for k, v in data.get("cooldowns", {}).items()}
             log.info(
-                "State loaded | active=%s | cooldowns=%d",
+                "State loaded | active=%s auto=%s | cooldowns=%d",
                 self.active.symbol if self.active else "none",
+                getattr(self.active, "auto_trade", False) if self.active else False,
                 len(self.cooldowns),
             )
         except Exception as e:
@@ -108,7 +115,13 @@ class TradeState:
         self.active = sig
         self.cooldowns[sig.symbol] = time.time() + config.PAIR_COOLDOWN_HOURS * 3600
         self.save()
-        log.info("LOCK ON | %s @ %.6g | lev %dx", sig.symbol, sig.entry, sig.leverage)
+        log.info(
+            "LOCK ON | %s @ %.6g | lev %dx | auto=%s",
+            sig.symbol,
+            sig.entry,
+            sig.leverage,
+            sig.auto_trade,
+        )
 
     def clear_active(self, reason: str = "manual") -> None:
         if self.active:
@@ -117,9 +130,11 @@ class TradeState:
         self.save()
 
     def maybe_release_on_price(self, last_price: float) -> Optional[str]:
-        """Return release reason if SL/TP2 hit; else None."""
+        """Signal-only lock release by price (no live position management)."""
         if not config.AUTO_RELEASE_ON_SL_TP or not self.active:
             return None
+        if self.active.auto_trade:
+            return None  # live trades sync via executor
         s = self.active
         if s.direction == "LONG":
             if last_price <= s.stop:
@@ -128,7 +143,7 @@ class TradeState:
             if last_price >= s.tp2:
                 self.clear_active("tp2_hit")
                 return "tp2_hit"
-        else:  # SHORT future-proof
+        else:
             if last_price >= s.stop:
                 self.clear_active("stop_hit")
                 return "stop_hit"

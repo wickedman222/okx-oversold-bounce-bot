@@ -281,8 +281,12 @@ def evaluate_pair(
         f"Signal TF: {config.SIGNAL_TIMEFRAME} | Trend TF: {config.TREND_TIMEFRAME}",
         f"ATR(14)={atr_v:.6g} ({atr_p:.2f}% of price)",
         f"Suggested partials: TP1 {config.TP1_SIZE_PCT}% / TP2 {config.TP2_SIZE_PCT}% / TP3 {config.TP3_SIZE_PCT}%",
-        "Phase 1: SIGNAL ONLY — no auto execution. Manage SL manually on MEXC.",
-        "Isolated margin recommended. Never move SL further away.",
+        "Isolated margin. Never move SL further away.",
+        (
+            "AUTO-TRADE will place this on MEXC if enabled."
+            if config.AUTO_TRADE
+            else "Signal mode: enter manually on MEXC if not auto-trading."
+        ),
     ]
     if symbol != config.BTC_SYMBOL and btc_rsi is not None:
         notes.append(f"BTC 15m RSI={btc_rsi:.1f} (filter passed)")

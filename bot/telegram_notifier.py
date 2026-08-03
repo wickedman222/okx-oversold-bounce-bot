@@ -21,7 +21,7 @@ log = logging.getLogger("bot.telegram")
 API = "https://api.telegram.org/bot{token}/{method}"
 
 
-def _send(text: str, parse_mode: str = "HTML") -> bool:
+def _send(text: str, parse_mode: str | None = "HTML") -> bool:
     if config.DRY_RUN:
         log.info("[DRY_RUN] Telegram message:\n%s", text)
         return True
@@ -30,17 +30,17 @@ def _send(text: str, parse_mode: str = "HTML") -> bool:
         return False
 
     url = API.format(token=config.TELEGRAM_BOT_TOKEN, method="sendMessage")
-    payload = {
+    payload: dict = {
         "chat_id": config.TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": parse_mode,
         "disable_web_page_preview": True,
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     try:
         r = requests.post(url, json=payload, timeout=30)
         if r.status_code != 200:
             log.error("Telegram HTTP %s: %s", r.status_code, r.text[:300])
-            # Retry without parse_mode if HTML fails
             if parse_mode:
                 payload.pop("parse_mode", None)
                 r2 = requests.post(url, json=payload, timeout=30)
@@ -141,12 +141,18 @@ def send_status(msg: str) -> bool:
 
 def send_trade_closed(symbol: str, reason: str, price: Optional[float] = None) -> bool:
     p = f" @ {_fmt_price(price)}" if price else ""
+    emoji = "🛑" if "stop" in reason else ("🎯" if "tp" in reason else "🔓")
     return _send(
-        f"🔓 <b>Trade lock released</b>\n"
+        f"{emoji} <b>Trade closed / lock free</b>\n"
         f"Pair: <code>{symbol}</code>\n"
-        f"Reason: {reason}{p}\n"
+        f"Reason: <code>{reason}</code>{p}\n"
         f"Scanner will accept new setups."
     )
+
+
+def send_plain(text: str) -> bool:
+    """Send multi-line plain text (auto-trade open notices)."""
+    return _send(text, parse_mode=None)
 
 
 def test_connection() -> bool:

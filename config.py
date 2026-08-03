@@ -108,7 +108,10 @@ TREND_TIMEFRAME = _env("TREND_TIMEFRAME", "4h") or "4h"
 CANDLE_LIMIT_SIGNAL = 120
 CANDLE_LIMIT_TREND = 120
 
-SCAN_INTERVAL_SEC = _env_int("SCAN_INTERVAL_SEC", "180")
+# How often to scan the market (seconds).
+# Strategy uses closed 15m candles → no need to poll every 2–3 min.
+# Default 10 minutes. Override on Railway Variables: SCAN_INTERVAL_SEC=900 (15m), etc.
+SCAN_INTERVAL_SEC = _env_int("SCAN_INTERVAL_SEC", "600")
 REQUEST_SLEEP_SEC = 0.15
 OHLCV_RETRIES = 3
 REQUEST_TIMEOUT = 25
@@ -165,7 +168,8 @@ AUTO_RELEASE_ON_SL_TP = True
 # =============================================================================
 MEXC_API_KEY = _env("MEXC_API_KEY", "")
 MEXC_API_SECRET = _env("MEXC_API_SECRET", "")
-AUTO_TRADE = _env_bool("AUTO_TRADE", "false")  # keep false until executor is live
+# Set AUTO_TRADE=true on Railway when keys are set and you want live orders.
+AUTO_TRADE = _env_bool("AUTO_TRADE", "false")
 MARGIN_MODE = "isolated"
 
 # =============================================================================
