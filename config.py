@@ -112,6 +112,8 @@ CANDLE_LIMIT_TREND = 120
 # Strategy uses closed 15m candles → no need to poll every 2–3 min.
 # Default 10 minutes. Override on Railway Variables: SCAN_INTERVAL_SEC=900 (15m), etc.
 SCAN_INTERVAL_SEC = _env_int("SCAN_INTERVAL_SEC", "600")
+# While a live trade is open, poll much more often (software SL/TP backup).
+IN_TRADE_POLL_SEC = _env_int("IN_TRADE_POLL_SEC", "45")
 REQUEST_SLEEP_SEC = 0.15
 OHLCV_RETRIES = 3
 REQUEST_TIMEOUT = 25

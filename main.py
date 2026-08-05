@@ -218,7 +218,13 @@ def scan_once(
 
         trade: OpenSignal = result["trade"]
         state.open_signal(trade)
-        send_plain(format_trade_opened(best, trade))
+        warnings = result.get("warnings") or []
+        send_plain(format_trade_opened(best, trade, warnings))
+        if warnings:
+            send_status(
+                f"⚠ Triggers incomplete on {best.symbol}: {', '.join(warnings)}. "
+                f"Check MEXC and set SL/TP manually if missing."
+            )
         return
 
     # ---- SIGNAL ONLY ----
@@ -357,8 +363,13 @@ def main() -> None:
                 consecutive_failures = 0
 
         elapsed = time.time() - cycle_start
-        sleep_for = max(5.0, config.SCAN_INTERVAL_SEC - elapsed)
-        log.info("Sleeping %.0fs until next scan…", sleep_for)
+        # Faster poll while a live auto-trade is open (SL/TP software backup)
+        if state.active and state.active.auto_trade:
+            target = float(config.IN_TRADE_POLL_SEC)
+        else:
+            target = float(config.SCAN_INTERVAL_SEC)
+        sleep_for = max(5.0, target - elapsed)
+        log.info("Sleeping %.0fs until next cycle…", sleep_for)
         try:
             time.sleep(sleep_for)
         except KeyboardInterrupt:
