@@ -142,6 +142,8 @@ def scan_once(
     errors = 0
 
     for symbol in symbols:
+        if symbol in md.blocked_symbols:
+            continue
         if state.on_cooldown(symbol):
             continue
         try:
@@ -192,26 +194,42 @@ def scan_once(
         best.leverage,
     )
 
-    # Always notify Telegram of the setup
-    if not send_signal(best):
-        log.error("Telegram failed — abort open this cycle")
-        return
-
-    append_signal(best)
-
-    # ---- LIVE OPEN ----
+    # ---- LIVE OPEN first (avoid TG spam on geo-blocked stock pairs) ----
     if executor.enabled:
         result = executor.place_signal(best)
-        log.info("Executor result ok=%s reason=%s", result.get("ok"), result.get("reason"))
+        reason = str(result.get("reason") or "")
+        log.info("Executor result ok=%s reason=%s", result.get("ok"), reason)
+
         if not result.get("ok"):
+            geo = any(
+                x in reason.lower()
+                for x in (
+                    "8950",
+                    "country or region",
+                    "unavailable in your country",
+                    "risk management reasons",
+                    "not available in your",
+                )
+            )
+            if geo:
+                md.block_symbol(best.symbol, "geo/region restricted")
+                state.cooldowns[best.symbol] = time.time() + 7 * 24 * 3600
+                state.save()
+                send_status(
+                    f"⏭ Skipped {best.symbol}\n"
+                    f"MEXC blocks opening this pair in your region (not a bot bug).\n"
+                    f"Pair blacklisted this session — waiting for next crypto setup."
+                )
+                return
+
+            send_signal(best)
+            append_signal(best)
             send_status(
                 f"❌ AUTO OPEN FAILED {best.symbol}\n"
-                f"{result.get('reason', 'unknown')}\n"
-                f"Signal was sent — manage manually or wait for next setup."
+                f"{reason}\n"
+                f"Signal sent — manage manually if you want, or wait for next setup."
             )
-            # Still lock conceptually so we don't spam opens on failure loops
-            # Only lock if reason is position_already_open; otherwise allow retry next scan
-            if result.get("reason") == "position_already_open":
+            if "position_already_open" in reason:
                 state.open_signal(
                     OpenSignal(
                         symbol=best.symbol,
@@ -229,6 +247,8 @@ def scan_once(
                 )
             return
 
+        send_signal(best)
+        append_signal(best)
         trade: OpenSignal = result["trade"]
         state.open_signal(trade)
         warnings = result.get("warnings") or []
@@ -236,11 +256,15 @@ def scan_once(
         if warnings:
             send_status(
                 f"⚠ Triggers incomplete on {best.symbol}: {', '.join(warnings)}. "
-                f"Check MEXC and set SL/TP manually if missing."
+                f"Check MEXC and set SL/TP manually if needed."
             )
         return
 
     # ---- SIGNAL ONLY ----
+    if not send_signal(best):
+        log.error("Telegram failed — abort this cycle")
+        return
+    append_signal(best)
     state.open_signal(
         OpenSignal(
             symbol=best.symbol,

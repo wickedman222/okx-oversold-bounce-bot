@@ -55,6 +55,15 @@ class MarketData:
         self._markets_loaded = False
         self._watchlist_cache: list[str] = []
         self._watchlist_cache_ts: float = 0.0
+        # Symbols that failed open due to geo/region (MEXC 8950 etc.) — session skip
+        self.blocked_symbols: set[str] = set()
+
+    def block_symbol(self, symbol: str, reason: str = "") -> None:
+        self.blocked_symbols.add(symbol)
+        # Drop from cache so we don't keep ranking it
+        if self._watchlist_cache:
+            self._watchlist_cache = [s for s in self._watchlist_cache if s != symbol]
+        log.warning("Blocked symbol for this session: %s (%s)", symbol, reason or "restricted")
 
     def load_markets(self, force: bool = False) -> dict:
         if self._markets_loaded and not force:
@@ -87,12 +96,13 @@ class MarketData:
             and not force_refresh
         )
         if cache_fresh:
+            wl = [s for s in self._watchlist_cache if s not in self.blocked_symbols]
             log.info(
                 "Watchlist cache hit: %d pairs (age %.0fs)",
-                len(self._watchlist_cache),
+                len(wl),
                 now - self._watchlist_cache_ts,
             )
-            return list(self._watchlist_cache)
+            return wl
 
         tickers = self._fetch_tickers_resilient()
         if tickers:
@@ -278,6 +288,8 @@ class MarketData:
             if s in markets and s not in top:
                 top.append(s)
 
+        # Drop session-blocked (geo) + keyword filters already applied
+        top = [s for s in top if s not in self.blocked_symbols]
         return top
 
     # -------------------------------------------------------------------------

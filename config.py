@@ -98,6 +98,9 @@ EXCLUDE_KEYWORDS = (
     "XAU/", "XAG/", "USOIL", "UKOIL", "WTI", "BRENT", "NATGAS",
     "SP500", "NAS100", "US30", "GER40", "HK50", "JP225",
     "EURUSD", "GBPUSD", "USDJPY", "BTCDOM",
+    # Stock-style perps — often geo-blocked (MEXC code 8950)
+    "STOCK", "SPCX", "TSLA/", "AAPL/", "NVDA/", "AMZN/", "META/",
+    "MSFT/", "GOOGL/", "COIN/", "MSTR/", "HOOD/", "PLTR/", "NFLX/", "AMD/",
 )
 
 # =============================================================================
