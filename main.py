@@ -62,17 +62,23 @@ def manage_open_trade(
     state: TradeState,
     executor: MexcExecutor,
 ) -> None:
-    """While locked: sync live position or release signal-only lock on price."""
+    """While locked: sync live position or release signal-only lock on price.
+
+    No full market scan here — only a few MEXC calls (position + ticker).
+    """
     if not state.active:
         return
     trade = state.active
     symbol = trade.symbol
+    prev_rem = trade.contracts_remaining
+    prev_tp1 = trade.tp1_done
 
     log.info(
-        "In-trade lock: %s | age=%.1fh | entry=%.6g | auto=%s",
+        "In-trade check: %s age=%.1fh entry=%.6g rem=%s auto=%s",
         symbol,
         trade.age_hours(),
         trade.entry,
+        trade.contracts_remaining,
         trade.auto_trade,
     )
 
@@ -83,12 +89,19 @@ def manage_open_trade(
             send_status(f"TP1 partial on {symbol} — runner left, SL→breakeven")
             return
         if reason in ("exchange_flat", "stop_hit", "tp2_hit"):
-            px = md.last_price(symbol)
+            px = None
+            try:
+                if executor.ex:
+                    t = executor.ex.fetch_ticker(symbol)
+                    px = float(t.get("last") or t.get("close") or 0) or None
+            except Exception:
+                px = md.last_price(symbol)
             state.clear_active(reason)
             send_trade_closed(symbol, reason, px)
             return
-        # still open — persist any remaining qty updates
-        state.save()
+        # Only write disk if size/flags changed (saves Railway FS churn)
+        if trade.contracts_remaining != prev_rem or trade.tp1_done != prev_tp1:
+            state.save()
         return
 
     # Signal-only conceptual lock
