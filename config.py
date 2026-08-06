@@ -98,10 +98,18 @@ EXCLUDE_KEYWORDS = (
     "XAU/", "XAG/", "USOIL", "UKOIL", "WTI", "BRENT", "NATGAS",
     "SP500", "NAS100", "US30", "GER40", "HK50", "JP225",
     "EURUSD", "GBPUSD", "USDJPY", "BTCDOM",
-    # Stock-style perps — often geo-blocked (MEXC code 8950)
-    "STOCK", "SPCX", "TSLA/", "AAPL/", "NVDA/", "AMZN/", "META/",
-    "MSFT/", "GOOGL/", "COIN/", "MSTR/", "HOOD/", "PLTR/", "NFLX/", "AMD/",
+    # Stock / ETF / equity perps — geo blocks + plan-order failures (SPY, SPCXSTOCK, …)
+    "STOCK", "SPCX", "SPY/", "QQQ/", "IWM/", "DIA/", "SPX/",
+    "TSLA/", "AAPL/", "NVDA/", "AMZN/", "META/", "MSFT/", "GOOGL/",
+    "COIN/", "MSTR/", "HOOD/", "PLTR/", "NFLX/", "AMD/",
 )
+
+# Exact base symbols never to trade (matched as BASE before /USDT)
+EXCLUDE_BASES = frozenset({
+    "SPY", "QQQ", "IWM", "DIA", "SPX", "SPCXSTOCK",
+    "TSLA", "AAPL", "NVDA", "AMZN", "META", "MSFT", "GOOGL", "GOOG",
+    "COIN", "MSTR", "HOOD", "PLTR", "NFLX", "AMD", "INTC", "BABA",
+})
 
 # =============================================================================
 # TIMEFRAMES

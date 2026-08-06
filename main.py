@@ -254,10 +254,15 @@ def scan_once(
         warnings = result.get("warnings") or []
         send_plain(format_trade_opened(best, trade, warnings))
         if warnings:
+            # Software backup still runs every IN_TRADE_POLL_SEC using stop/tp prices
             send_status(
-                f"⚠ Triggers incomplete on {best.symbol}: {', '.join(warnings)}. "
-                f"Check MEXC and set SL/TP manually if needed."
+                f"⚠ Exchange SL/TP triggers failed on {best.symbol}: {', '.join(warnings)}.\n"
+                f"Position is OPEN — bot will still manage exits in software "
+                f"(check every ~{config.IN_TRADE_POLL_SEC}s).\n"
+                f"Best: open MEXC and set SL/TP manually, or close if you prefer."
             )
+            # Stock-like junk: block further signals on this base
+            md.block_symbol(best.symbol, "triggers_failed")
         return
 
     # ---- SIGNAL ONLY ----

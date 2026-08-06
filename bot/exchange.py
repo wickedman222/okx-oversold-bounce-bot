@@ -238,6 +238,13 @@ class MarketData:
             return False
         if any(k in symbol.upper() for k in config.EXCLUDE_KEYWORDS):
             return False
+        base = symbol.split("/")[0].upper() if "/" in symbol else symbol.upper()
+        if base in getattr(config, "EXCLUDE_BASES", ()):
+            return False
+        if "STOCK" in base:
+            return False
+        if symbol in self.blocked_symbols:
+            return False
         if ":USDT" in symbol:
             return True
         if m.get("swap") or m.get("linear") or m.get("type") in ("swap", "future"):
