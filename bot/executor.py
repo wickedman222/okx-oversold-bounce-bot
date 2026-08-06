@@ -78,17 +78,33 @@ class MexcExecutor:
 
             self._set_leverage(sig.symbol, sig.direction, sig.leverage)
             qty = self._size_contracts(sig.symbol, sig.entry, sig.leverage)
+
+            # Attach native SL/TP on the entry order (most reliable on MEXC).
+            # Also place planorders after fill as a second layer.
+            try:
+                sl_px = float(self.ex.price_to_precision(sig.symbol, sig.stop))
+                tp_px = float(self.ex.price_to_precision(sig.symbol, sig.tp2))
+            except Exception:
+                sl_px, tp_px = float(sig.stop), float(sig.tp2)
+
             params = {
                 "openType": 1 if config.MARGIN_MODE == "isolated" else 2,
                 "hedged": False,
                 "leverage": sig.leverage,
+                "positionMode": 2,  # one-way
+                "stopLossPrice": sl_px,
+                "takeProfitPrice": tp_px,
+                "lossTrend": 1,
+                "profitTrend": 1,
             }
             log.info(
-                "OPEN LONG %s qty=%s lev=%dx margin=$%.0f",
+                "OPEN LONG %s qty=%s lev=%dx margin=$%.0f SL=%s TP=%s",
                 sig.symbol,
                 qty,
                 sig.leverage,
                 config.POSITION_SIZE_USD,
+                sl_px,
+                tp_px,
             )
             order = self.ex.create_order(sig.symbol, "market", "buy", qty, None, params)
             fill = float(order.get("average") or order.get("price") or sig.entry)
@@ -104,21 +120,28 @@ class MexcExecutor:
             notional = qty * csize * fill
             margin = notional / max(sig.leverage, 1)
 
-            # --- Protective orders: full-size SL + full-size TP2 only ---
-            # Split TP1/TP2 triggers with overlapping SL qty is a top cause of
-            # MEXC "trigger failed" after partial fills.
-            sl_id = self._place_trigger(
-                sig.symbol, sig.direction, qty, sig.stop, is_stop=True, leverage=sig.leverage
+            # Layer 2: explicit plan orders (fixed parsing — ccxt often drops MEXC plan ids)
+            sl_id = self._place_plan_order(
+                sig.symbol, qty, sl_px, is_stop=True, leverage=sig.leverage
             )
-            tp_id = self._place_trigger(
-                sig.symbol, sig.direction, qty, sig.tp2, is_stop=False, leverage=sig.leverage
+            tp_id = self._place_plan_order(
+                sig.symbol, qty, tp_px, is_stop=False, leverage=sig.leverage
             )
 
             warnings = []
             if not sl_id:
-                warnings.append("SL_TRIGGER_FAILED")
+                warnings.append("SL_PLAN_UNCONFIRMED")
             if not tp_id:
-                warnings.append("TP_TRIGGER_FAILED")
+                warnings.append("TP_PLAN_UNCONFIRMED")
+            # Entry may still have attached stopLossPrice/takeProfitPrice
+            if warnings:
+                log.warning(
+                    "Plan order ids missing for %s — entry had native SL/TP params; "
+                    "software backup still active. sl=%s tp=%s",
+                    sig.symbol,
+                    sl_id,
+                    tp_id,
+                )
 
             trade = OpenSignal(
                 symbol=sig.symbol,
@@ -396,49 +419,134 @@ class MexcExecutor:
         )
         return qty
 
-    def _place_trigger(
+    def _place_plan_order(
         self,
         symbol: str,
-        direction: str,
         qty: float,
         trigger: float,
         is_stop: bool,
         leverage: int,
     ) -> str:
+        """
+        Place MEXC plan order (close-long) via contract API directly.
+
+        Why not only ccxt create_order(triggerPrice=...):
+          - MEXC often returns data as a bare order id number
+          - ccxt safe_dict() drops that → empty id even on success
+          - market type is remapped in ways that break planorder
+        """
         assert self.ex is not None
-        side = "sell" if direction == "LONG" else "buy"
-        ttype = (2 if is_stop else 1) if direction == "LONG" else (1 if is_stop else 2)
+        m = self.ex.market(symbol)
+        market_id = m.get("id") or symbol.replace("/USDT:USDT", "_USDT")
         try:
             trigger_px = float(self.ex.price_to_precision(symbol, trigger))
+            vol = float(self.ex.amount_to_precision(symbol, qty))
         except Exception:
-            trigger_px = float(trigger)
-        params: dict[str, Any] = {
-            "reduceOnly": True,
-            "triggerPrice": trigger_px,
-            "triggerType": ttype,
-            "executeCycle": 1,  # GTC until cancel / fill
-            "trend": 1,  # last price
-            "orderType": 5,  # market on trigger
+            trigger_px, vol = float(trigger), float(qty)
+
+        # LONG close: side 4. SL triggerType 2 (<=), TP triggerType 1 (>=)
+        body: dict[str, Any] = {
+            "symbol": market_id,
+            "vol": vol,
+            "leverage": int(leverage),
+            "side": 4,  # close long
             "openType": 1 if config.MARGIN_MODE == "isolated" else 2,
-            "hedged": False,
-            "leverage": leverage,
+            "triggerPrice": trigger_px,
+            "triggerType": 2 if is_stop else 1,
+            "executeCycle": 2,  # 7 days (1 = 24h only — too short)
+            "orderType": 5,  # market on trigger
+            "trend": 1,  # last price
+            "reduceOnly": True,
+            "positionMode": 2,  # one-way
         }
-        try:
-            q = float(self.ex.amount_to_precision(symbol, qty))
-            o = self.ex.create_order(symbol, "market", side, q, None, params)
-            oid = str(o.get("id") or "")
+
+        # Prefer v2, fall back to v1
+        resp = None
+        last_err: Optional[Exception] = None
+        for method_name in (
+            "contractPrivatePostPlanorderPlaceV2",
+            "contractPrivatePostPlanorderPlace",
+        ):
+            method = getattr(self.ex, method_name, None)
+            if method is None:
+                continue
+            try:
+                resp = method(body)
+                break
+            except Exception as e:
+                last_err = e
+                log.warning("%s failed: %s", method_name, e)
+
+        if resp is None:
+            # Last resort: ccxt unified path
+            try:
+                o = self.ex.create_order(
+                    symbol,
+                    "market",
+                    "sell",
+                    vol,
+                    None,
+                    {
+                        "reduceOnly": True,
+                        "triggerPrice": trigger_px,
+                        "triggerType": 2 if is_stop else 1,
+                        "executeCycle": 2,
+                        "trend": 1,
+                        "orderType": 5,
+                        "openType": 1 if config.MARGIN_MODE == "isolated" else 2,
+                        "leverage": leverage,
+                        "hedged": False,
+                        "positionMode": 2,
+                    },
+                )
+                oid = str(o.get("id") or "")
+                if oid:
+                    log.info(
+                        "Plan(ccxt) %s %s qty=%s @ %s id=%s",
+                        "SL" if is_stop else "TP",
+                        symbol,
+                        vol,
+                        _fmt_px(trigger_px),
+                        oid,
+                    )
+                    return oid
+            except Exception as e:
+                last_err = e
+            log.error(
+                "plan order failed (%s @ %s): %s",
+                symbol,
+                trigger_px,
+                last_err,
+            )
+            return ""
+
+        # Parse success + id (handles bare id OR {orderId: ...})
+        ok = resp.get("success") is True or str(resp.get("code")) in ("0", "200")
+        data = resp.get("data")
+        oid = ""
+        if isinstance(data, dict):
+            oid = str(data.get("orderId") or data.get("id") or "")
+        elif data is not None:
+            oid = str(data)
+
+        if ok and oid:
             log.info(
-                "Trigger %s %s qty=%s @ %s id=%s",
+                "Plan %s %s qty=%s @ %s id=%s",
                 "SL" if is_stop else "TP",
                 symbol,
-                q,
+                vol,
                 _fmt_px(trigger_px),
-                oid or "(empty)",
+                oid,
             )
             return oid
-        except Exception as e:
-            log.error("trigger failed (%s @ %s): %s", symbol, trigger_px, e)
-            return ""
+
+        log.error(
+            "plan order bad response (%s @ %s): %s",
+            symbol,
+            trigger_px,
+            resp,
+        )
+        return oid if oid else ""
 
     def _cancel_symbol_orders(self, symbol: str) -> None:
         """Best-effort cancel open + plan/stop orders so size mismatches clear."""
