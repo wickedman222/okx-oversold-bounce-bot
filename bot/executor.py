@@ -238,29 +238,31 @@ class MexcExecutor:
                 trade.tp1_done = True
                 trade.contracts_remaining = rem2
                 trade.contracts = rem2
-                trade.stop = trade.entry  # breakeven for runner
-                # Kill old full-size triggers (would fail on reduced size) and re-arm
-                self._cancel_symbol_orders(trade.symbol)
-                time.sleep(0.4)
-                sl = self._place_trigger(
-                    trade.symbol,
-                    trade.direction,
-                    rem2,
-                    trade.stop,
-                    is_stop=True,
-                    leverage=trade.leverage,
-                )
-                tp = self._place_trigger(
-                    trade.symbol,
-                    trade.direction,
-                    rem2,
-                    trade.tp2,
-                    is_stop=False,
-                    leverage=trade.leverage,
-                )
-                trade.sl_order_id = sl
-                trade.tp2_order_id = tp
-                log.info("TP1 done; re-armed SL/TP for rem=%s sl=%s tp=%s", rem2, sl, tp)
+                # Keep original SL if still below entry; else breakeven
+                if trade.stop <= 0 or trade.stop >= trade.entry:
+                    trade.stop = trade.entry
+                # Kill old full-size triggers and re-arm for remaining size
+                try:
+                    self._cancel_symbol_orders(trade.symbol)
+                    time.sleep(0.4)
+                    sl = self._place_plan_order(
+                        trade.symbol, rem2, trade.stop, is_stop=True, leverage=trade.leverage
+                    )
+                    tp = self._place_plan_order(
+                        trade.symbol, rem2, trade.tp2, is_stop=False, leverage=trade.leverage
+                    )
+                    trade.sl_order_id = sl
+                    trade.tp2_order_id = tp
+                    log.info(
+                        "TP1 done; re-armed SL/TP for rem=%s sl=%s tp=%s",
+                        rem2,
+                        sl or "FAIL",
+                        tp or "FAIL",
+                    )
+                except Exception as e:
+                    log.error("TP1 re-arm failed (partial already filled): %s", e)
+                    trade.sl_order_id = ""
+                    trade.tp2_order_id = ""
                 return "tp1_partial"
             return None
 
@@ -615,6 +617,93 @@ class MexcExecutor:
 
 def build_executor() -> MexcExecutor:
     return MexcExecutor()
+
+
+def rehydrate_from_exchange(executor: MexcExecutor) -> Optional[OpenSignal]:
+    """
+    Railway disk is ephemeral — after redeploy local lock is gone but MEXC
+    position may still be open. Rebuild a minimal OpenSignal so we monitor
+    instead of opening a second trade.
+    """
+    if not executor.keys_ok or not executor.ex:
+        return None
+    try:
+        positions = executor.ex.fetch_positions()
+    except Exception as e:
+        log.warning("rehydrate fetch_positions: %s", e)
+        return None
+
+    for p in positions or []:
+        info = p.get("info") or {}
+        try:
+            c = abs(float(p.get("contracts") or 0))
+            if c == 0:
+                c = abs(float(info.get("holdVol") or 0))
+        except (TypeError, ValueError):
+            c = 0
+        if c <= 0:
+            continue
+
+        sym = str(p.get("symbol") or "")
+        info_sym = str(info.get("symbol") or "")
+        # Prefer unified ccxt symbol
+        if "/USDT" in sym:
+            symbol = sym if ":USDT" in sym else (sym + ":USDT" if not sym.endswith(":USDT") else sym)
+            if not symbol.endswith(":USDT") and symbol.endswith("/USDT"):
+                symbol = symbol + ":USDT"
+        elif info_sym.endswith("_USDT"):
+            base = info_sym.replace("_USDT", "")
+            symbol = f"{base}/USDT:USDT"
+        else:
+            continue
+
+        side = (p.get("side") or "").lower()
+        pt = str(info.get("positionType") or "")
+        if not side:
+            side = "long" if pt == "1" else "short" if pt == "2" else "long"
+        if side not in ("long", "buy"):
+            log.info("Skip rehydrate non-long %s", symbol)
+            continue
+
+        entry = float(
+            p.get("entryPrice")
+            or info.get("openAvgPrice")
+            or info.get("holdAvgPrice")
+            or 0
+        )
+        lev = int(float(p.get("leverage") or info.get("leverage") or config.LEVERAGE_DEFAULT))
+        # Without original signal levels: software SL ~1.2% below entry, TP2 ~2.5% above
+        # (conservative monitor-only until flat)
+        stop = entry * 0.988 if entry > 0 else 0.0
+        tp2 = entry * 1.025 if entry > 0 else 0.0
+        tp1 = entry * 1.012 if entry > 0 else 0.0
+
+        trade = OpenSignal(
+            symbol=symbol,
+            direction="LONG",
+            entry=entry,
+            stop=stop,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp2,
+            leverage=lev,
+            confidence=0,
+            reason_short="rehydrated_from_exchange",
+            contracts=c,
+            contracts_remaining=c,
+            margin_usd=config.POSITION_SIZE_USD,
+            notional_usd=0.0,
+            tp1_done=False,
+            auto_trade=True,
+        )
+        log.warning(
+            "Rehydrated open LONG %s qty=%s entry=%s (monitor until flat)",
+            symbol,
+            c,
+            entry,
+        )
+        return trade
+    return None
 
 
 def format_trade_opened(sig: Signal, trade: OpenSignal, warnings: Optional[list] = None) -> str:

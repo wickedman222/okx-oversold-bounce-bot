@@ -27,7 +27,12 @@ if str(ROOT) not in sys.path:
 
 import config
 from bot.exchange import MarketData
-from bot.executor import MexcExecutor, build_executor, format_trade_opened
+from bot.executor import (
+    MexcExecutor,
+    build_executor,
+    format_trade_opened,
+    rehydrate_from_exchange,
+)
 from bot.indicators import rsi
 from bot.scanner import Signal, evaluate_pair
 from bot.signal_log import append_signal
@@ -83,10 +88,25 @@ def manage_open_trade(
     )
 
     if trade.auto_trade and executor.keys_ok:
-        reason = executor.sync_open_trade(trade)
+        try:
+            reason = executor.sync_open_trade(trade)
+        except Exception as e:
+            log.error("sync_open_trade error: %s", e)
+            send_status(f"⚠ Sync error on {symbol}: {e}")
+            return
         if reason == "tp1_partial":
             state.save()
-            send_status(f"TP1 partial on {symbol} — runner left, SL→breakeven")
+            arm = []
+            if not trade.sl_order_id:
+                arm.append("SL re-arm failed")
+            if not trade.tp2_order_id:
+                arm.append("TP2 re-arm failed — set TP manually on MEXC")
+            extra = (" | " + "; ".join(arm)) if arm else " | SL/TP2 re-armed for runner"
+            send_status(
+                f"🎯 TP1 partial on {symbol}\n"
+                f"Closed ~{config.TP1_SIZE_PCT}% | remaining {trade.contracts_remaining:g}\n"
+                f"Runner toward TP2={trade.tp2}{extra}"
+            )
             return
         if reason in ("exchange_flat", "stop_hit", "tp2_hit"):
             px = None
@@ -119,6 +139,20 @@ def scan_once(
     state: TradeState,
     executor: MexcExecutor,
 ) -> None:
+    # After Railway redeploy, lock file is gone — pick up open MEXC positions
+    if not state.is_locked() and executor.enabled:
+        recovered = rehydrate_from_exchange(executor)
+        if recovered:
+            state.open_signal(recovered)
+            send_status(
+                f"♻️ Reconnected to open position {recovered.symbol}\n"
+                f"Entry≈{recovered.entry} qty={recovered.contracts:g}\n"
+                f"Monitoring (no new trades until flat). "
+                f"Set SL/TP on MEXC if missing."
+            )
+            manage_open_trade(md, state, executor)
+            return
+
     if state.is_locked():
         manage_open_trade(md, state, executor)
         return
@@ -384,6 +418,15 @@ def main() -> None:
     except Exception as e:
         log.error("Initial market load failed: %s", e)
         sys.exit(1)
+
+    # Immediate reconnect if MEXC already has a position
+    if executor.enabled and not state.active:
+        recovered = rehydrate_from_exchange(executor)
+        if recovered:
+            state.open_signal(recovered)
+            send_status(
+                f"♻️ Startup: found open {recovered.symbol} on MEXC — monitoring until flat."
+            )
 
     consecutive_failures = 0
     while True:
