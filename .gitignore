@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+logs/
+trade_state.json
+*.log
+.idea/
+.vscode/

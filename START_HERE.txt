@@ -16,15 +16,23 @@ RAILWAY DEPLOY:
   3. Wait for Active + "scanner online" Telegram message
   4. Full steps: open RAILWAY.md
 
-OPTIONAL VARIABLES (Railway → Variables):
+WHERE TO ADD VARS ON RAILWAY:
+  Project → click your SERVICE card → top tab "Variables" → + New Variable
+  (There is no separate "MEXC menu" — just variable names below.)
+
+OPTIONAL VARIABLES (Phase 1 — no MEXC needed for signals):
   POSITION_SIZE_USD=50
-  SCAN_INTERVAL_SEC=180
+  SCAN_INTERVAL_SEC=600    (10 min; use 900 for 15 min)
   MIN_CONFIDENCE=68
 
-LATER (auto-trade):
+LATER (auto-trade Phase 2 only):
   MEXC_API_KEY=...
   MEXC_API_SECRET=...
   AUTO_TRADE=true   (only after executor.py is implemented)
+
+FASTEST FIX PATH:
+  A) Config only (size, sleep, confidence) → Railway Variables → save → redeploy
+  B) Code change → edit GitHub / tell me → push main → Railway auto-redeploys
 
 LOCAL TEST:
   python -m venv .venv
