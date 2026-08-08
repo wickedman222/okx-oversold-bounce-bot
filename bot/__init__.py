@@ -1,3 +1,3 @@
-"""Liquid Oversold Bounce signal bot package."""
+"""Bybit Oversold Bounce Bot package."""
 
 __version__ = "1.0.0"

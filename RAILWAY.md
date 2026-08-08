@@ -1,4 +1,4 @@
-# Deploy on Railway — Bybit
+# Bybit Oversold Bounce Bot — Railway
 
 ## Variables (Raw Editor)
 

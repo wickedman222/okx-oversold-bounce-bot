@@ -1,5 +1,5 @@
 """
-Central configuration — Liquid Oversold Bounce bot (Bybit USDT linear).
+Central configuration — Bybit Oversold Bounce Bot (USDT linear).
 
 POSITION SIZE
   Fixed USDT margin per trade (default $50). Not a % of balance.

@@ -595,7 +595,7 @@ def rehydrate_from_exchange(executor: MexcExecutor) -> Optional[OpenSignal]:
 def format_trade_opened(sig: Signal, trade: OpenSignal, warnings: Optional[list] = None) -> str:
     pair = sig.symbol.replace(":USDT", "").replace("/", "")
     lines = [
-        "🟢 LIVE TRADE OPENED | Oversold Bounce | BYBIT",
+        "🟢 LIVE TRADE OPENED | Bybit Oversold Bounce Bot",
         f"Pair: {sig.symbol}",
         f"Direction: LONG",
         f"Fill entry: {_fmt_px(trade.entry)}",

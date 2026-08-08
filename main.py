@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Liquid Oversold Bounce — Signal + optional Bybit auto-trade
-===========================================================
+Bybit Oversold Bounce Bot — signals + optional auto-trade
+=========================================================
 
 - FIXED $50 USDT margin per trade (POSITION_SIZE_USD)
 - Max 1 open trade
@@ -328,7 +328,7 @@ def start_health_server() -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
             body = (
-                f"ok\noversold-bounce-bot\n"
+                f"ok\nbybit-oversold-bounce-bot\n"
                 f"position_usd={config.POSITION_SIZE_USD}\n"
                 f"max_open={config.MAX_OPEN_TRADES}\n"
                 f"auto_trade={config.AUTO_TRADE}\n"
@@ -355,7 +355,7 @@ def start_health_server() -> None:
 
 def main() -> None:
     log.info("=" * 60)
-    log.info("Oversold Bounce Bot starting")
+    log.info("Bybit Oversold Bounce Bot starting")
     log.info(
         "FIXED margin=$%.0f USDT per trade | max_open=%d | lev=%d–%d | scan=%ss",
         config.POSITION_SIZE_USD,
@@ -387,7 +387,8 @@ def main() -> None:
 
     try:
         send_status(
-            f"Oversold Bounce online ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC)\n"
+            f"Bybit Oversold Bounce Bot online "
+            f"({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC)\n"
             f"Exchange: BYBIT USDT linear\n"
             f"Mode: {mode}\n"
             f"Fixed ${config.POSITION_SIZE_USD:.0f}/trade | 1 open max\n"
