@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Liquid Oversold Bounce — Signal + optional MEXC auto-trade
-==========================================================
+Liquid Oversold Bounce — Signal + optional Bybit auto-trade
+===========================================================
 
 - FIXED $50 USDT margin per trade (POSITION_SIZE_USD)
 - Max 1 open trade
-- AUTO_TRADE=true + MEXC keys → live isolated orders with SL/TP triggers
+- AUTO_TRADE=true + BYBIT keys → live isolated linear orders with SL/TP
 - AUTO_TRADE=false → Telegram signals only
 """
 
@@ -251,8 +251,8 @@ def scan_once(
                 state.save()
                 send_status(
                     f"⏭ Skipped {best.symbol}\n"
-                    f"MEXC blocks opening this pair in your region (not a bot bug).\n"
-                    f"Pair blacklisted this session — waiting for next crypto setup."
+                    f"Exchange blocks opening this pair (region/product rule).\n"
+                    f"Pair blacklisted this session — waiting for next setup."
                 )
                 return
 
@@ -295,7 +295,7 @@ def scan_once(
                 f"Entry was sent with native SL={trade.stop} / TP2={trade.tp2}.\n"
                 f"Check MEXC position for SL/TP. Bot also manages exits in software "
                 f"(~every {config.IN_TRADE_POLL_SEC}s).\n"
-                f"If no SL on MEXC UI → set manually now."
+                f"If no SL on Bybit UI → set manually now."
             )
         return
 
@@ -368,9 +368,9 @@ def main() -> None:
         "dry_run=%s | auto_trade=%s | mexc_keys=%s",
         config.DRY_RUN,
         config.AUTO_TRADE,
-        "set" if (config.MEXC_API_KEY and config.MEXC_API_SECRET) else "NOT SET",
+        "set" if (config.BYBIT_API_KEY and config.BYBIT_API_SECRET) else "NOT SET",
     )
-    log.info("Telegram chat=%s", config.TELEGRAM_CHAT_ID)
+    log.info("Exchange=Bybit linear | Telegram chat=%s", config.TELEGRAM_CHAT_ID)
     log.info("=" * 60)
 
     start_health_server()
@@ -382,12 +382,13 @@ def main() -> None:
 
     executor = build_executor()
     bal = executor.fetch_balance_usdt() if executor.keys_ok else None
-    mode = "LIVE AUTO-TRADE" if executor.enabled else "SIGNAL-ONLY"
+    mode = "LIVE AUTO-TRADE (BYBIT)" if executor.enabled else "SIGNAL-ONLY"
     bal_txt = f"${bal:.2f} free USDT" if bal is not None else "n/a"
 
     try:
         send_status(
             f"Oversold Bounce online ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC)\n"
+            f"Exchange: BYBIT USDT linear\n"
             f"Mode: {mode}\n"
             f"Fixed ${config.POSITION_SIZE_USD:.0f}/trade | 1 open max\n"
             f"Balance peek: {bal_txt}"
@@ -396,8 +397,11 @@ def main() -> None:
         pass
 
     if config.AUTO_TRADE and not executor.keys_ok:
-        log.error("AUTO_TRADE=true but MEXC keys missing — refusing to run live")
-        send_status("⚠️ AUTO_TRADE=true but MEXC keys missing. Set keys or set AUTO_TRADE=false.")
+        log.error("AUTO_TRADE=true but BYBIT keys missing — refusing to run live")
+        send_status(
+            "⚠️ AUTO_TRADE=true but BYBIT_API_KEY/SECRET missing. "
+            "Set keys on Railway or set AUTO_TRADE=false."
+        )
         sys.exit(1)
 
     if executor.enabled and bal is not None and bal < config.POSITION_SIZE_USD:

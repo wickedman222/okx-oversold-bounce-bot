@@ -1,17 +1,15 @@
 """
-Central configuration for the Liquid Oversold Bounce signal bot.
+Central configuration — Liquid Oversold Bounce bot (Bybit USDT linear).
 
 POSITION SIZE
-  Always a FIXED USDT margin per trade (default $50).
-  Never a % of account balance. One trade at a time.
+  Fixed USDT margin per trade (default $50). Not a % of balance.
+  Max 1 open trade.
 
-TELEGRAM
-  Hardcoded in this file (as requested). Railway Variables can still
-  override if you set TELEGRAM_* later.
+TELEGRAM — hardcoded (override via env if needed).
 
-RAILWAY VARIABLES (set later in Railway → Variables tab):
-  MEXC_API_KEY, MEXC_API_SECRET, AUTO_TRADE, POSITION_SIZE_USD, etc.
-  See RAILWAY.md for the full list.
+RAILWAY VARIABLES:
+  BYBIT_API_KEY, BYBIT_API_SECRET, AUTO_TRADE, POSITION_SIZE_USD,
+  SCAN_INTERVAL_SEC, IN_TRADE_POLL_SEC, ...
 """
 
 from __future__ import annotations
@@ -21,7 +19,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load local .env if present (optional; Railway injects env vars directly)
 _ROOT = Path(__file__).resolve().parent
 load_dotenv(_ROOT / ".env")
 
@@ -49,8 +46,7 @@ def _env_int(key: str, default: str) -> int:
 
 
 # =============================================================================
-# TELEGRAM — hardcoded (you said this is fine in code)
-# Railway Variables TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID still override if set.
+# TELEGRAM
 # =============================================================================
 TELEGRAM_BOT_TOKEN = _env(
     "TELEGRAM_BOT_TOKEN",
@@ -60,22 +56,19 @@ TELEGRAM_CHAT_ID = _env("TELEGRAM_CHAT_ID", "-1004326901305")
 
 # =============================================================================
 # POSITION / RISK
-# FIXED $50 USDT margin PER TRADE — not a percentage of balance.
-# When Phase 2 auto-trades: order uses exactly this many USDT as margin.
 # =============================================================================
-POSITION_SIZE_USD = _env_float("POSITION_SIZE_USD", "50")  # fixed margin $
-MAX_OPEN_TRADES = _env_int("MAX_OPEN_TRADES", "1")  # hard: 1 only
+POSITION_SIZE_USD = _env_float("POSITION_SIZE_USD", "50")
+MAX_OPEN_TRADES = _env_int("MAX_OPEN_TRADES", "1")
 
-# Leverage bounds — bot recommends inside this range (notional = $50 * lev)
 LEVERAGE_MIN = _env_int("LEVERAGE_MIN", "3")
 LEVERAGE_MAX = _env_int("LEVERAGE_MAX", "12")
 LEVERAGE_DEFAULT = _env_int("LEVERAGE_DEFAULT", "5")
 
 # =============================================================================
-# EXCHANGE / SCAN (public MEXC data — no keys needed for Phase 1 signals)
+# EXCHANGE — Bybit USDT linear perpetuals
 # =============================================================================
-EXCHANGE_ID = "mexc"
-MARKET_TYPE = "swap"
+EXCHANGE_ID = "bybit"
+MARKET_TYPE = "linear"  # USDT perpetual
 QUOTE = "USDT"
 
 TOP_N_PAIRS = _env_int("TOP_N_PAIRS", "40")
@@ -98,13 +91,10 @@ EXCLUDE_KEYWORDS = (
     "XAU/", "XAG/", "USOIL", "UKOIL", "WTI", "BRENT", "NATGAS",
     "SP500", "NAS100", "US30", "GER40", "HK50", "JP225",
     "EURUSD", "GBPUSD", "USDJPY", "BTCDOM",
-    # Stock / ETF / equity perps — geo blocks + plan-order failures (SPY, SPCXSTOCK, …)
     "STOCK", "SPCX", "SPY/", "QQQ/", "IWM/", "DIA/", "SPX/",
     "TSLA/", "AAPL/", "NVDA/", "AMZN/", "META/", "MSFT/", "GOOGL/",
     "COIN/", "MSTR/", "HOOD/", "PLTR/", "NFLX/", "AMD/",
 )
-
-# Exact base symbols never to trade (matched as BASE before /USDT)
 EXCLUDE_BASES = frozenset({
     "SPY", "QQQ", "IWM", "DIA", "SPX", "SPCXSTOCK",
     "TSLA", "AAPL", "NVDA", "AMZN", "META", "MSFT", "GOOGL", "GOOG",
@@ -119,21 +109,15 @@ TREND_TIMEFRAME = _env("TREND_TIMEFRAME", "4h") or "4h"
 CANDLE_LIMIT_SIGNAL = 120
 CANDLE_LIMIT_TREND = 120
 
-# How often to scan the market (seconds).
-# Strategy uses closed 15m candles → no need to poll every 2–3 min.
-# Default 10 minutes. Override on Railway Variables: SCAN_INTERVAL_SEC=900 (15m), etc.
 SCAN_INTERVAL_SEC = _env_int("SCAN_INTERVAL_SEC", "600")
-# While a live trade is open, poll for software SL/TP backup (not full market scan).
-# Default 2 min — low API usage; still backs up failed MEXC triggers.
-# Override on Railway: IN_TRADE_POLL_SEC=120
 _in_trade = _env_int("IN_TRADE_POLL_SEC", "120")
-IN_TRADE_POLL_SEC = max(60, min(600, _in_trade))  # clamp 1–10 min
-REQUEST_SLEEP_SEC = 0.15
+IN_TRADE_POLL_SEC = max(60, min(600, _in_trade))
+REQUEST_SLEEP_SEC = 0.12
 OHLCV_RETRIES = 3
 REQUEST_TIMEOUT = 25
 
 # =============================================================================
-# STRATEGY: Liquid Oversold Bounce
+# STRATEGY
 # =============================================================================
 TREND_EMA_PERIOD = 50
 TREND_REQUIRE_SLOPE_UP = True
@@ -180,25 +164,24 @@ TRADE_LOCK_MAX_HOURS = _env_float("TRADE_LOCK_MAX_HOURS", "12")
 AUTO_RELEASE_ON_SL_TP = True
 
 # =============================================================================
-# PHASE 2 — MEXC keys from Railway Variables tab (leave empty for signals-only)
+# BYBIT API (Railway Variables)
+# Also accept legacy MEXC_* names as fallback so old env doesn't crash import.
 # =============================================================================
-MEXC_API_KEY = _env("MEXC_API_KEY", "")
-MEXC_API_SECRET = _env("MEXC_API_SECRET", "")
-# Set AUTO_TRADE=true on Railway when keys are set and you want live orders.
+BYBIT_API_KEY = _env("BYBIT_API_KEY", "") or _env("MEXC_API_KEY", "")
+BYBIT_API_SECRET = _env("BYBIT_API_SECRET", "") or _env("MEXC_API_SECRET", "")
+# Keep old names as aliases for any leftover references during migration
+MEXC_API_KEY = BYBIT_API_KEY
+MEXC_API_SECRET = BYBIT_API_SECRET
+
 AUTO_TRADE = _env_bool("AUTO_TRADE", "false")
 MARGIN_MODE = "isolated"
 
 # =============================================================================
 # PATHS / LOGGING / RAILWAY
 # =============================================================================
-# On Railway the filesystem is ephemeral; lock resets on redeploy (acceptable
-# for Phase 1). For durable lock later, use a volume or Redis.
 STATE_FILE = str(_ROOT / "trade_state.json")
 SIGNAL_LOG_CSV = str(_ROOT / "logs" / "signals.csv")
 LOG_DIR = str(_ROOT / "logs")
 LOG_LEVEL = _env("LOG_LEVEL", "INFO") or "INFO"
-
 DRY_RUN = _env_bool("DRY_RUN", "false")
-
-# Railway injects PORT — health server binds here
 PORT = _env_int("PORT", "8080")

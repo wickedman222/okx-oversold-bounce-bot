@@ -1,16 +1,11 @@
 """
-Phase 2 — MEXC USDT-M auto execution (hardened).
+Bybit USDT linear auto execution.
 
-Rules:
-  - FIXED margin = POSITION_SIZE_USD ($50) per trade
-  - Isolated + variable leverage
-  - Max 1 trade managed by this bot
-
-Exit design (avoids common MEXC "failed trigger" cases):
-  - Exchange: ONE stop (full size) + ONE take-profit (full size @ TP2)
-  - Software: TP1 partial optional, then re-arm SL for remaining
-  - Always close using LIVE position size from exchange (not stale state)
-  - Never treat position-fetch errors as "flat"
+- FIXED margin = POSITION_SIZE_USD ($50)
+- Isolated + variable leverage
+- Max 1 trade (state lock + rehydrate)
+- Entry market LONG with attached SL + TP2 (Bybit trading-stop / params)
+- Software TP1 partial + re-arm; software SL/TP2 backup
 """
 
 from __future__ import annotations
@@ -42,8 +37,10 @@ def _fmt_px(p: float) -> str:
 
 
 class MexcExecutor:
+    """Name kept for import compatibility; implements Bybit."""
+
     def __init__(self) -> None:
-        self.keys_ok = bool(config.MEXC_API_KEY and config.MEXC_API_SECRET)
+        self.keys_ok = bool(config.BYBIT_API_KEY and config.BYBIT_API_SECRET)
         self.enabled = bool(config.AUTO_TRADE and self.keys_ok)
         self.ex: Optional[ccxt.Exchange] = None
         if self.keys_ok:
@@ -54,18 +51,15 @@ class MexcExecutor:
                 log.warning("Private markets load: %s", e)
         if self.enabled:
             log.warning(
-                "AUTO_TRADE ON — live MEXC orders | margin=$%.0f isolated",
+                "AUTO_TRADE ON — live BYBIT orders | margin=$%.0f isolated",
                 config.POSITION_SIZE_USD,
             )
         elif self.keys_ok:
-            log.info("MEXC keys present but AUTO_TRADE=false (signal-only)")
+            log.info("Bybit keys present but AUTO_TRADE=false (signal-only)")
         else:
             log.info("Executor idle (no keys / signal-only)")
 
     # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def place_signal(self, sig: Signal) -> dict[str, Any]:
         if not self.enabled or self.ex is None:
             return {"ok": False, "reason": "auto_trade_disabled"}
@@ -76,29 +70,25 @@ class MexcExecutor:
             if self._has_any_bot_conflict(sig.symbol):
                 return {"ok": False, "reason": "position_already_open"}
 
-            self._set_leverage(sig.symbol, sig.direction, sig.leverage)
+            self._set_leverage(sig.symbol, sig.leverage)
             qty = self._size_contracts(sig.symbol, sig.entry, sig.leverage)
 
-            # Attach native SL/TP on the entry order (most reliable on MEXC).
-            # Also place planorders after fill as a second layer.
             try:
                 sl_px = float(self.ex.price_to_precision(sig.symbol, sig.stop))
                 tp_px = float(self.ex.price_to_precision(sig.symbol, sig.tp2))
             except Exception:
                 sl_px, tp_px = float(sig.stop), float(sig.tp2)
 
-            params = {
-                "openType": 1 if config.MARGIN_MODE == "isolated" else 2,
-                "hedged": False,
-                "leverage": sig.leverage,
-                "positionMode": 2,  # one-way
-                "stopLossPrice": sl_px,
-                "takeProfitPrice": tp_px,
-                "lossTrend": 1,
-                "profitTrend": 1,
+            params: dict[str, Any] = {
+                "category": "linear",
+                "reduceOnly": False,
+                # Attached SL/TP (Bybit v5 via ccxt)
+                "stopLoss": {"triggerPrice": sl_px},
+                "takeProfit": {"triggerPrice": tp_px},
             }
+
             log.info(
-                "OPEN LONG %s qty=%s lev=%dx margin=$%.0f SL=%s TP=%s",
+                "OPEN LONG %s qty=%s lev=%dx margin=$%.0f SL=%s TP2=%s",
                 sig.symbol,
                 qty,
                 sig.leverage,
@@ -108,40 +98,24 @@ class MexcExecutor:
             )
             order = self.ex.create_order(sig.symbol, "market", "buy", qty, None, params)
             fill = float(order.get("average") or order.get("price") or sig.entry)
-            time.sleep(1.2)
+            time.sleep(1.0)
 
-            # Re-read filled size from exchange if possible
             still, live_qty = self._position_remaining(sig.symbol)
             if still and live_qty > 0:
                 qty = live_qty
+
+            # Explicit trading-stop backup (full position SL + TP2)
+            sl_id, tp_id = self._set_trading_stop(sig.symbol, sl_px, tp_px)
+            warnings = []
+            if not sl_id:
+                warnings.append("SL_SET_UNCONFIRMED")
+            if not tp_id:
+                warnings.append("TP_SET_UNCONFIRMED")
 
             m = self.ex.market(sig.symbol)
             csize = float(m.get("contractSize") or 1)
             notional = qty * csize * fill
             margin = notional / max(sig.leverage, 1)
-
-            # Layer 2: explicit plan orders (fixed parsing — ccxt often drops MEXC plan ids)
-            sl_id = self._place_plan_order(
-                sig.symbol, qty, sl_px, is_stop=True, leverage=sig.leverage
-            )
-            tp_id = self._place_plan_order(
-                sig.symbol, qty, tp_px, is_stop=False, leverage=sig.leverage
-            )
-
-            warnings = []
-            if not sl_id:
-                warnings.append("SL_PLAN_UNCONFIRMED")
-            if not tp_id:
-                warnings.append("TP_PLAN_UNCONFIRMED")
-            # Entry may still have attached stopLossPrice/takeProfitPrice
-            if warnings:
-                log.warning(
-                    "Plan order ids missing for %s — entry had native SL/TP params; "
-                    "software backup still active. sl=%s tp=%s",
-                    sig.symbol,
-                    sl_id,
-                    tp_id,
-                )
 
             trade = OpenSignal(
                 symbol=sig.symbol,
@@ -176,14 +150,10 @@ class MexcExecutor:
             }
         except Exception as e:
             log.error("place_signal failed: %s\n%s", e, traceback.format_exc())
+            # Region / product blocks
             return {"ok": False, "reason": str(e)}
 
     def sync_open_trade(self, trade: OpenSignal) -> Optional[str]:
-        """
-        Returns:
-          exchange_flat | stop_hit | tp2_hit | tp1_partial | None
-        Never returns flat on API error.
-        """
         if not self.keys_ok or self.ex is None or not trade.auto_trade:
             return None
 
@@ -194,8 +164,6 @@ class MexcExecutor:
             return None
 
         if not still or rem <= 0:
-            # Position gone — try cancel leftover triggers
-            self._cancel_symbol_orders(trade.symbol)
             return "exchange_flat"
 
         trade.contracts_remaining = rem
@@ -209,95 +177,94 @@ class MexcExecutor:
         if px <= 0:
             return None
 
-        buf = abs(trade.entry) * 0.0003  # tiny noise buffer
+        buf = abs(trade.entry) * 0.0003
 
-        # --- Software SL backup (if exchange trigger failed/missed) ---
         if trade.direction == "LONG" and trade.stop > 0 and px <= trade.stop - buf:
             if self.close_all_remaining(trade):
-                self._cancel_symbol_orders(trade.symbol)
                 return "stop_hit"
             return None
 
-        # --- Optional software TP1 partial (~40%), then re-arm full SL/TP on remainder ---
         if (
             not trade.tp1_done
-            and rem > 1
+            and rem > 0
             and trade.tp1 > 0
             and trade.direction == "LONG"
             and px >= trade.tp1 + buf
         ):
+            # Partial ~40%; if amount too small for partial, skip to runner only
             frac = max(0.2, min(0.6, config.TP1_SIZE_PCT / 100.0))
-            q = max(1.0, math.floor(trade.contracts * frac))
-            q = min(q, rem - 1)
-            if self.market_close(trade, q):
-                time.sleep(0.8)
-                still2, rem2 = self._position_remaining(trade.symbol)
-                if not still2 or rem2 <= 0:
-                    self._cancel_symbol_orders(trade.symbol)
-                    return "tp2_hit"  # fully gone after partial attempt
+            q = rem * frac
+            try:
+                q = float(self.ex.amount_to_precision(trade.symbol, q))
+            except Exception:
+                q = round(q, 4)
+            mn = float(
+                (self.ex.market(trade.symbol).get("limits") or {})
+                .get("amount", {})
+                .get("min")
+                or 0
+            )
+            # Need remainder after partial to still be >= min
+            if q >= mn and (rem - q) >= mn:
+                if self.market_close(trade, q):
+                    time.sleep(0.6)
+                    still2, rem2 = self._position_remaining(trade.symbol)
+                    if not still2 or rem2 <= 0:
+                        return "tp2_hit"
+                    trade.tp1_done = True
+                    trade.contracts_remaining = rem2
+                    trade.contracts = rem2
+                    if trade.stop <= 0 or trade.stop >= trade.entry:
+                        trade.stop = trade.entry
+                    try:
+                        sl_id, tp_id = self._set_trading_stop(
+                            trade.symbol, trade.stop, trade.tp2
+                        )
+                        trade.sl_order_id = sl_id
+                        trade.tp2_order_id = tp_id
+                        log.info(
+                            "TP1 done; re-armed SL/TP rem=%s sl=%s tp=%s",
+                            rem2,
+                            sl_id or "FAIL",
+                            tp_id or "FAIL",
+                        )
+                    except Exception as e:
+                        log.error("TP1 re-arm failed: %s", e)
+                        trade.sl_order_id = ""
+                        trade.tp2_order_id = ""
+                    return "tp1_partial"
+            else:
+                # Can't partial cleanly — wait for full TP2
                 trade.tp1_done = True
-                trade.contracts_remaining = rem2
-                trade.contracts = rem2
-                # Keep original SL if still below entry; else breakeven
-                if trade.stop <= 0 or trade.stop >= trade.entry:
-                    trade.stop = trade.entry
-                # Kill old full-size triggers and re-arm for remaining size
-                try:
-                    self._cancel_symbol_orders(trade.symbol)
-                    time.sleep(0.4)
-                    sl = self._place_plan_order(
-                        trade.symbol, rem2, trade.stop, is_stop=True, leverage=trade.leverage
-                    )
-                    tp = self._place_plan_order(
-                        trade.symbol, rem2, trade.tp2, is_stop=False, leverage=trade.leverage
-                    )
-                    trade.sl_order_id = sl
-                    trade.tp2_order_id = tp
-                    log.info(
-                        "TP1 done; re-armed SL/TP for rem=%s sl=%s tp=%s",
-                        rem2,
-                        sl or "FAIL",
-                        tp or "FAIL",
-                    )
-                except Exception as e:
-                    log.error("TP1 re-arm failed (partial already filled): %s", e)
-                    trade.sl_order_id = ""
-                    trade.tp2_order_id = ""
-                return "tp1_partial"
-            return None
+                log.info("TP1 skipped (size too small for partial) — hold for TP2")
 
-        # --- Software TP2 backup ---
         if trade.direction == "LONG" and trade.tp2 > 0 and px >= trade.tp2 + buf:
             if self.close_all_remaining(trade):
-                self._cancel_symbol_orders(trade.symbol)
                 return "tp2_hit"
             return None
 
         return None
 
     def close_all_remaining(self, trade: OpenSignal) -> bool:
-        """Close 100% of LIVE exchange size for this symbol (retry)."""
         if not self.ex:
             return False
         try:
             still, rem = self._position_remaining(trade.symbol)
         except Exception as e:
-            log.error("close_all: cannot fetch position: %s", e)
+            log.error("close_all: %s", e)
             rem = trade.contracts_remaining or trade.contracts
             still = rem > 0
         if not still or rem <= 0:
             return True
         ok = self.market_close(trade, rem)
         if ok:
-            time.sleep(0.6)
+            time.sleep(0.5)
             try:
                 still2, rem2 = self._position_remaining(trade.symbol)
                 if still2 and rem2 > 0:
-                    log.warning("Dust remaining %s qty=%s — second close", trade.symbol, rem2)
-                    ok2 = self.market_close(trade, rem2)
-                    return ok2
-            except Exception as e:
-                log.warning("post-close check: %s", e)
+                    return self.market_close(trade, rem2)
+            except Exception:
+                pass
         return ok
 
     def market_close(self, trade: OpenSignal, qty: Optional[float] = None) -> bool:
@@ -309,12 +276,7 @@ class MexcExecutor:
         if q <= 0:
             return True
         side = "sell" if trade.direction == "LONG" else "buy"
-        params = {
-            "reduceOnly": True,
-            "openType": 1 if config.MARGIN_MODE == "isolated" else 2,
-            "hedged": False,
-            "leverage": trade.leverage,
-        }
+        params = {"category": "linear", "reduceOnly": True}
         for attempt in range(1, 4):
             try:
                 q = float(self.ex.amount_to_precision(trade.symbol, q))
@@ -325,8 +287,7 @@ class MexcExecutor:
                 return True
             except Exception as e:
                 log.error("market_close attempt %d: %s", attempt, e)
-                time.sleep(0.5 * attempt)
-                # refresh live size
+                time.sleep(0.4 * attempt)
                 try:
                     still, rem = self._position_remaining(trade.symbol)
                     if not still or rem <= 0:
@@ -340,7 +301,7 @@ class MexcExecutor:
         if not self.ex:
             return None
         try:
-            bal = self.ex.fetch_balance({"type": "swap"})
+            bal = self.ex.fetch_balance({"type": "unified"})
         except Exception:
             try:
                 bal = self.ex.fetch_balance()
@@ -367,53 +328,45 @@ class MexcExecutor:
             return False
 
     # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
     def _has_any_bot_conflict(self, symbol: str) -> bool:
         if self.has_open_position_on(symbol):
             log.warning("Already in position on %s — skip open", symbol)
             return True
         return False
 
-    def _set_leverage(self, symbol: str, direction: str, leverage: int) -> None:
+    def _set_leverage(self, symbol: str, leverage: int) -> None:
         assert self.ex is not None
         try:
-            self.ex.set_leverage(
-                leverage,
-                symbol,
-                {
-                    "openType": 1 if config.MARGIN_MODE == "isolated" else 2,
-                    "positionType": 1 if direction == "LONG" else 2,
-                },
-            )
-        except Exception as e:
-            log.warning("set_leverage: %s", e)
-        try:
             self.ex.set_margin_mode(config.MARGIN_MODE, symbol)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("set_margin_mode: %s", e)
+        try:
+            self.ex.set_leverage(leverage, symbol)
+        except Exception as e:
+            # Bybit may error if leverage already set
+            log.warning("set_leverage: %s", e)
 
     def _size_contracts(self, symbol: str, price: float, leverage: int) -> float:
+        """Bybit linear: amount in base coin; notional ≈ amount * price."""
         assert self.ex is not None
         m = self.ex.market(symbol)
         csize = float(m.get("contractSize") or 1)
-        if price <= 0 or csize <= 0:
-            raise ValueError("bad price/contractSize")
-        raw = (config.POSITION_SIZE_USD * leverage) / (csize * price)
-        raw = math.floor(raw)
-        mn = float(m.get("limits", {}).get("amount", {}).get("min") or 1)
+        if price <= 0:
+            raise ValueError("bad price")
+        notional = config.POSITION_SIZE_USD * leverage
+        raw = notional / (csize * price)
+        mn = float(m.get("limits", {}).get("amount", {}).get("min") or 0.001)
         qty = max(mn, float(raw))
         qty = float(self.ex.amount_to_precision(symbol, qty))
         if qty < mn:
             raise ValueError(
-                f"size too small for ${config.POSITION_SIZE_USD} @ {leverage}x"
+                f"size too small for ${config.POSITION_SIZE_USD} @ {leverage}x on {symbol}"
             )
         eff_margin = (qty * csize * price) / max(leverage, 1)
         if eff_margin > config.POSITION_SIZE_USD * 2.5:
             raise ValueError(f"effective margin ${eff_margin:.1f} too large vs target")
         log.info(
-            "Size %s: contracts=%s eff_margin≈$%.2f notional≈$%.2f",
+            "Size %s: qty=%s eff_margin≈$%.2f notional≈$%.2f",
             symbol,
             qty,
             eff_margin,
@@ -421,196 +374,148 @@ class MexcExecutor:
         )
         return qty
 
-    def _place_plan_order(
-        self,
-        symbol: str,
-        qty: float,
-        trigger: float,
-        is_stop: bool,
-        leverage: int,
-    ) -> str:
+    def _set_trading_stop(
+        self, symbol: str, stop_loss: float, take_profit: float
+    ) -> tuple[str, str]:
         """
-        Place MEXC plan order (close-long) via contract API directly.
-
-        Why not only ccxt create_order(triggerPrice=...):
-          - MEXC often returns data as a bare order id number
-          - ccxt safe_dict() drops that → empty id even on success
-          - market type is remapped in ways that break planorder
+        Set position TP/SL via Bybit trading-stop.
+        Returns (sl_ok_marker, tp_ok_marker) non-empty on success.
         """
         assert self.ex is not None
-        m = self.ex.market(symbol)
-        market_id = m.get("id") or symbol.replace("/USDT:USDT", "_USDT")
+        sl_ok, tp_ok = "", ""
         try:
-            trigger_px = float(self.ex.price_to_precision(symbol, trigger))
-            vol = float(self.ex.amount_to_precision(symbol, qty))
+            sl_px = float(self.ex.price_to_precision(symbol, stop_loss))
+            tp_px = float(self.ex.price_to_precision(symbol, take_profit))
         except Exception:
-            trigger_px, vol = float(trigger), float(qty)
+            sl_px, tp_px = float(stop_loss), float(take_profit)
 
-        # LONG close: side 4. SL triggerType 2 (<=), TP triggerType 1 (>=)
-        body: dict[str, Any] = {
-            "symbol": market_id,
-            "vol": vol,
-            "leverage": int(leverage),
-            "side": 4,  # close long
-            "openType": 1 if config.MARGIN_MODE == "isolated" else 2,
-            "triggerPrice": trigger_px,
-            "triggerType": 2 if is_stop else 1,
-            "executeCycle": 2,  # 7 days (1 = 24h only — too short)
-            "orderType": 5,  # market on trigger
-            "trend": 1,  # last price
-            "reduceOnly": True,
-            "positionMode": 2,  # one-way
-        }
-
-        # Prefer v2, fall back to v1
-        resp = None
-        last_err: Optional[Exception] = None
-        for method_name in (
-            "contractPrivatePostPlanorderPlaceV2",
-            "contractPrivatePostPlanorderPlace",
-        ):
-            method = getattr(self.ex, method_name, None)
-            if method is None:
-                continue
-            try:
-                resp = method(body)
-                break
-            except Exception as e:
-                last_err = e
-                log.warning("%s failed: %s", method_name, e)
-
-        if resp is None:
-            # Last resort: ccxt unified path
-            try:
-                o = self.ex.create_order(
+        # Method 1: create_order with stopLossPrice / takeProfitPrice on trading-stop path
+        try:
+            # Full position trading stop via unified helper if present
+            if hasattr(self.ex, "private_post_v5_position_trading_stop"):
+                m = self.ex.market(symbol)
+                body = {
+                    "category": "linear",
+                    "symbol": m["id"],
+                    "tpslMode": "Full",
+                    "positionIdx": 0,  # one-way
+                    "stopLoss": str(sl_px),
+                    "takeProfit": str(tp_px),
+                    "slTriggerBy": "LastPrice",
+                    "tpTriggerBy": "LastPrice",
+                }
+                resp = self.ex.private_post_v5_position_trading_stop(body)
+                ret = str(resp.get("retCode") or resp.get("ret_code") or "")
+                if ret in ("0", "0.0", ""):
+                    log.info("trading-stop OK %s SL=%s TP=%s", symbol, sl_px, tp_px)
+                    return "sl_ok", "tp_ok"
+                log.warning("trading-stop ret: %s", resp)
+            else:
+                # ccxt path
+                self.ex.create_order(
                     symbol,
                     "market",
                     "sell",
-                    vol,
+                    0,
                     None,
                     {
-                        "reduceOnly": True,
-                        "triggerPrice": trigger_px,
-                        "triggerType": 2 if is_stop else 1,
-                        "executeCycle": 2,
-                        "trend": 1,
-                        "orderType": 5,
-                        "openType": 1 if config.MARGIN_MODE == "isolated" else 2,
-                        "leverage": leverage,
-                        "hedged": False,
-                        "positionMode": 2,
+                        "stopLossPrice": sl_px,
+                        "takeProfitPrice": tp_px,
+                        "tradingStopEndpoint": True,
+                        "category": "linear",
                     },
                 )
-                oid = str(o.get("id") or "")
-                if oid:
-                    log.info(
-                        "Plan(ccxt) %s %s qty=%s @ %s id=%s",
-                        "SL" if is_stop else "TP",
-                        symbol,
-                        vol,
-                        _fmt_px(trigger_px),
-                        oid,
-                    )
-                    return oid
-            except Exception as e:
-                last_err = e
-            log.error(
-                "plan order failed (%s @ %s): %s",
-                symbol,
-                trigger_px,
-                last_err,
-            )
-            return ""
-
-        # Parse success + id (handles bare id OR {orderId: ...})
-        ok = resp.get("success") is True or str(resp.get("code")) in ("0", "200")
-        data = resp.get("data")
-        oid = ""
-        if isinstance(data, dict):
-            oid = str(data.get("orderId") or data.get("id") or "")
-        elif data is not None:
-            oid = str(data)
-
-        if ok and oid:
-            log.info(
-                "Plan %s %s qty=%s @ %s id=%s",
-                "SL" if is_stop else "TP",
-                symbol,
-                vol,
-                _fmt_px(trigger_px),
-                oid,
-            )
-            return oid
-
-        log.error(
-            "plan order bad response (%s @ %s): %s",
-            symbol,
-            trigger_px,
-            resp,
-        )
-        return oid if oid else ""
-
-    def _cancel_symbol_orders(self, symbol: str) -> None:
-        """Best-effort cancel open + plan/stop orders so size mismatches clear."""
-        if not self.ex:
-            return
-        try:
-            self.ex.cancel_all_orders(symbol)
-            log.info("cancel_all_orders %s", symbol)
+                return "sl_ok", "tp_ok"
         except Exception as e:
-            log.debug("cancel_all_orders: %s", e)
-        # MEXC sometimes needs planorder cancel_all via implicit API
+            log.warning("trading-stop batch failed: %s — try separate", e)
+
+        # Method 2: separate stop-loss and take-profit reduce orders
         try:
-            m = self.ex.market(symbol)
-            raw = m.get("id") or symbol.replace("/USDT:USDT", "_USDT")
-            if hasattr(self.ex, "contractPrivatePostPlanorderCancelAll"):
-                self.ex.contractPrivatePostPlanorderCancelAll({"symbol": raw})
-            if hasattr(self.ex, "contractPrivatePostStoporderCancelAll"):
-                self.ex.contractPrivatePostStoporderCancelAll({"symbol": raw})
+            o1 = self.ex.create_order(
+                symbol,
+                "market",
+                "sell",
+                None,
+                None,
+                {
+                    "stopLossPrice": sl_px,
+                    "reduceOnly": True,
+                    "category": "linear",
+                    "triggerDirection": "descending",
+                },
+            )
+            sl_ok = str(o1.get("id") or "sl_ok")
         except Exception as e:
-            log.debug("plan/stop cancel_all: %s", e)
+            log.error("SL order failed: %s", e)
+
+        try:
+            o2 = self.ex.create_order(
+                symbol,
+                "market",
+                "sell",
+                None,
+                None,
+                {
+                    "takeProfitPrice": tp_px,
+                    "reduceOnly": True,
+                    "category": "linear",
+                    "triggerDirection": "ascending",
+                },
+            )
+            tp_ok = str(o2.get("id") or "tp_ok")
+        except Exception as e:
+            log.error("TP order failed: %s", e)
+
+        return sl_ok, tp_ok
 
     def _position_remaining(self, symbol: str) -> tuple[bool, float]:
-        """
-        Raises on total API failure so callers do not treat as flat.
-        Returns (in_position, contracts).
-        """
         assert self.ex is not None
         last_err: Optional[Exception] = None
+        positions = None
         for attempt in range(1, 4):
             try:
                 try:
-                    positions = self.ex.fetch_positions([symbol])
+                    positions = self.ex.fetch_positions([symbol], {"category": "linear"})
                 except TypeError:
-                    positions = self.ex.fetch_positions()
+                    positions = self.ex.fetch_positions([symbol])
+                except Exception:
+                    positions = self.ex.fetch_positions({"category": "linear"})
                 break
             except Exception as e:
                 last_err = e
-                time.sleep(0.4 * attempt)
-        else:
+                time.sleep(0.3 * attempt)
+        if positions is None:
             raise RuntimeError(f"fetch_positions failed: {last_err}")
 
-        pair_mexc = symbol.replace("/USDT:USDT", "_USDT").replace("/", "_")
-        base = pair_mexc.split("_")[0] if "_" in pair_mexc else symbol.split("/")[0]
-
+        base = symbol.split("/")[0] if "/" in symbol else symbol
         for p in positions or []:
             info = p.get("info") or {}
             sym = str(p.get("symbol") or "")
             info_sym = str(info.get("symbol") or "")
             if not (
                 symbol in sym
-                or pair_mexc == info_sym
-                or pair_mexc in info_sym
-                or (base and (info_sym.startswith(base + "_") or base + "/" in sym))
+                or base in sym
+                or info_sym in (base + "USDT", symbol, base)
+                or sym.endswith(base)
             ):
-                continue
+                # strict: must match this market
+                try:
+                    if self.ex.market(symbol)["symbol"] not in (sym, symbol):
+                        if info_sym != self.ex.market(symbol).get("id"):
+                            continue
+                except Exception:
+                    continue
             c = abs(float(p.get("contracts") or 0))
             if c == 0:
                 try:
-                    c = abs(float(info.get("holdVol") or 0))
+                    c = abs(float(info.get("size") or info.get("qty") or 0))
                 except (TypeError, ValueError):
                     c = 0
             if c > 0:
+                # only count long for this bot
+                side = (p.get("side") or info.get("side") or "").lower()
+                if side in ("short", "sell"):
+                    continue
                 return True, c
         return False, 0.0
 
@@ -620,17 +525,15 @@ def build_executor() -> MexcExecutor:
 
 
 def rehydrate_from_exchange(executor: MexcExecutor) -> Optional[OpenSignal]:
-    """
-    Railway disk is ephemeral — after redeploy local lock is gone but MEXC
-    position may still be open. Rebuild a minimal OpenSignal so we monitor
-    instead of opening a second trade.
-    """
     if not executor.keys_ok or not executor.ex:
         return None
     try:
-        positions = executor.ex.fetch_positions()
+        try:
+            positions = executor.ex.fetch_positions(params={"category": "linear"})
+        except TypeError:
+            positions = executor.ex.fetch_positions()
     except Exception as e:
-        log.warning("rehydrate fetch_positions: %s", e)
+        log.warning("rehydrate: %s", e)
         return None
 
     for p in positions or []:
@@ -638,42 +541,32 @@ def rehydrate_from_exchange(executor: MexcExecutor) -> Optional[OpenSignal]:
         try:
             c = abs(float(p.get("contracts") or 0))
             if c == 0:
-                c = abs(float(info.get("holdVol") or 0))
+                c = abs(float(info.get("size") or info.get("qty") or 0))
         except (TypeError, ValueError):
             c = 0
         if c <= 0:
             continue
 
+        side = (p.get("side") or info.get("side") or "").lower()
+        if side in ("short", "sell"):
+            continue
+
         sym = str(p.get("symbol") or "")
         info_sym = str(info.get("symbol") or "")
-        # Prefer unified ccxt symbol
         if "/USDT" in sym:
-            symbol = sym if ":USDT" in sym else (sym + ":USDT" if not sym.endswith(":USDT") else sym)
-            if not symbol.endswith(":USDT") and symbol.endswith("/USDT"):
+            symbol = sym if ":USDT" in sym else f"{sym}:USDT" if not sym.endswith(":USDT") else sym
+            if symbol.endswith("/USDT") and ":USDT" not in symbol:
                 symbol = symbol + ":USDT"
-        elif info_sym.endswith("_USDT"):
-            base = info_sym.replace("_USDT", "")
+        elif info_sym.endswith("USDT") and "/" not in info_sym:
+            base = info_sym.replace("USDT", "")
             symbol = f"{base}/USDT:USDT"
         else:
             continue
 
-        side = (p.get("side") or "").lower()
-        pt = str(info.get("positionType") or "")
-        if not side:
-            side = "long" if pt == "1" else "short" if pt == "2" else "long"
-        if side not in ("long", "buy"):
-            log.info("Skip rehydrate non-long %s", symbol)
-            continue
-
         entry = float(
-            p.get("entryPrice")
-            or info.get("openAvgPrice")
-            or info.get("holdAvgPrice")
-            or 0
+            p.get("entryPrice") or info.get("avgPrice") or info.get("entryPrice") or 0
         )
         lev = int(float(p.get("leverage") or info.get("leverage") or config.LEVERAGE_DEFAULT))
-        # Without original signal levels: software SL ~1.2% below entry, TP2 ~2.5% above
-        # (conservative monitor-only until flat)
         stop = entry * 0.988 if entry > 0 else 0.0
         tp2 = entry * 1.025 if entry > 0 else 0.0
         tp1 = entry * 1.012 if entry > 0 else 0.0
@@ -688,41 +581,34 @@ def rehydrate_from_exchange(executor: MexcExecutor) -> Optional[OpenSignal]:
             tp3=tp2,
             leverage=lev,
             confidence=0,
-            reason_short="rehydrated_from_exchange",
+            reason_short="rehydrated_from_bybit",
             contracts=c,
             contracts_remaining=c,
             margin_usd=config.POSITION_SIZE_USD,
-            notional_usd=0.0,
-            tp1_done=False,
             auto_trade=True,
         )
-        log.warning(
-            "Rehydrated open LONG %s qty=%s entry=%s (monitor until flat)",
-            symbol,
-            c,
-            entry,
-        )
+        log.warning("Rehydrated Bybit LONG %s qty=%s entry=%s", symbol, c, entry)
         return trade
     return None
 
 
 def format_trade_opened(sig: Signal, trade: OpenSignal, warnings: Optional[list] = None) -> str:
-    pair = sig.symbol.replace(":USDT", "").replace("/", "_")
+    pair = sig.symbol.replace(":USDT", "").replace("/", "")
     lines = [
-        "🟢 LIVE TRADE OPENED | Oversold Bounce",
-        f"Pair: {sig.symbol} ({pair})",
+        "🟢 LIVE TRADE OPENED | Oversold Bounce | BYBIT",
+        f"Pair: {sig.symbol}",
         f"Direction: LONG",
         f"Fill entry: {_fmt_px(trade.entry)}",
         f"Stop-Loss: {_fmt_px(trade.stop)}",
         f"TP1 (soft partial): {_fmt_px(trade.tp1)} (~{config.TP1_SIZE_PCT}%)",
-        f"TP2 (exchange + soft): {_fmt_px(trade.tp2)}",
+        f"TP2: {_fmt_px(trade.tp2)}",
         f"Leverage: {trade.leverage}x isolated",
         f"Margin≈ ${trade.margin_usd:.2f} (target ${config.POSITION_SIZE_USD:.0f})",
-        f"Contracts: {trade.contracts:g} | Notional≈ ${trade.notional_usd:.2f}",
+        f"Size: {trade.contracts:g} | Notional≈ ${trade.notional_usd:.2f}",
         f"Confidence: {sig.confidence:.0f}/100",
-        f"Chart: https://futures.mexc.com/exchange/{pair}",
-        "Exchange arms: full SL + full TP2. Software backs up every poll.",
+        f"Chart: https://www.bybit.com/trade/usdt/{pair}",
+        "Bybit SL/TP attached + software backup every poll.",
     ]
     if warnings:
-        lines.append("⚠ " + ", ".join(warnings) + " — set SL/TP on MEXC manually if needed")
+        lines.append("⚠ " + ", ".join(warnings) + " — verify SL/TP on Bybit UI")
     return "\n".join(lines)
