@@ -394,11 +394,16 @@ def main() -> None:
     mode = "LIVE AUTO-TRADE (OKX)" if executor.enabled else "SIGNAL-ONLY"
     if margin_info and margin_info.get("by_asset"):
         parts = [f"{k} {v:.2f}" for k, v in margin_info["by_asset"].items()]
-        bal_txt = f"total≈${bal:.2f} free ({', '.join(parts)}) — USDC OK as perp collateral"
+        bal_txt = (
+            f"total≈${bal:.2f} free ({', '.join(parts)}) "
+            f"— USDC OK as perp collateral"
+        )
     elif bal is not None:
         bal_txt = f"${bal:.2f} free stable margin"
     else:
-        bal_txt = "n/a"
+        bal_txt = (
+            "n/a (could not read — check eea host + key permissions Read)"
+        )
 
     try:
         send_status(

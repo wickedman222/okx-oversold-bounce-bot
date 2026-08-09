@@ -304,43 +304,129 @@ class MexcExecutor:
 
     def fetch_margin_balances(self) -> Optional[dict[str, Any]]:
         """
-        OKX EU / multi-ccy: perps can be margined with USDC (and other stables),
-        even when the contract is quoted as USDT-SWAP.
+        OKX multi-ccy / EU: parse trading account balance (USDC etc.).
+
+        OKX shape:
+          info.data[0].details[] = { ccy, availEq, availBal, eq, eqUsd, ... }
+          info.data[0].totalEq = account equity in USD
         """
         if not self.ex:
             return None
-        try:
-            bal = self.ex.fetch_balance()
-        except Exception as e:
-            log.warning("balance: %s", e)
-            return None
 
         free_by: dict[str, float] = {}
-        for asset in getattr(config, "MARGIN_ASSETS", ("USDC", "USDT")):
-            row = bal.get(asset) or {}
+        total_eq_usd: Optional[float] = None
+        last_err: Optional[Exception] = None
+        assets = getattr(config, "MARGIN_ASSETS", ("USDC", "USDT", "USDG", "USD"))
+
+        # Try trading account first, then funding
+        for bal_type in ("trading", "funding", None):
             try:
-                free = row.get("free")
-                if free is None:
-                    free = row.get("total")
-                if free is not None:
-                    free_by[asset] = float(free)
-            except (TypeError, ValueError):
+                if bal_type:
+                    bal = self.ex.fetch_balance({"type": bal_type})
+                else:
+                    bal = self.ex.fetch_balance()
+            except Exception as e:
+                last_err = e
+                log.warning("balance type=%s: %s", bal_type, e)
                 continue
 
-        # Also scan info for eq/availEq style fields if unified
-        try:
-            details = (bal.get("info") or {}).get("data") or []
-            if isinstance(details, list):
-                for d in details:
-                    ccy = str(d.get("ccy") or "").upper()
-                    if ccy in getattr(config, "MARGIN_ASSETS", ()):
-                        avail = d.get("availBal") or d.get("availEq") or d.get("cashBal")
-                        if avail is not None:
-                            free_by[ccy] = max(free_by.get(ccy, 0.0), float(avail))
-        except Exception:
-            pass
+            # Unified ccxt currency keys
+            for asset in assets:
+                row = bal.get(asset) or {}
+                try:
+                    free = row.get("free")
+                    if free is None:
+                        free = row.get("total")
+                    if free is not None and float(free) > 0:
+                        free_by[asset] = max(free_by.get(asset, 0.0), float(free))
+                except (TypeError, ValueError):
+                    pass
+
+            # Raw OKX payload (nested details)
+            try:
+                info = bal.get("info") or {}
+                data = info.get("data") or []
+                if isinstance(data, dict):
+                    data = [data]
+                for acct in data:
+                    if not isinstance(acct, dict):
+                        continue
+                    te = acct.get("totalEq") or acct.get("adjEq")
+                    if te not in (None, ""):
+                        try:
+                            total_eq_usd = float(te)
+                        except (TypeError, ValueError):
+                            pass
+                    details = acct.get("details") or []
+                    if isinstance(details, dict):
+                        details = [details]
+                    for d in details:
+                        if not isinstance(d, dict):
+                            continue
+                        ccy = str(d.get("ccy") or "").upper()
+                        if ccy not in assets:
+                            continue
+                        # Prefer available for trading, then equity
+                        for key in (
+                            "availEq",
+                            "availBal",
+                            "cashBal",
+                            "eq",
+                            "disEq",
+                            "eqUsd",
+                        ):
+                            raw = d.get(key)
+                            if raw in (None, ""):
+                                continue
+                            try:
+                                val = float(raw)
+                            except (TypeError, ValueError):
+                                continue
+                            if val > 0:
+                                free_by[ccy] = max(free_by.get(ccy, 0.0), val)
+                                break
+            except Exception as e:
+                log.debug("parse balance info: %s", e)
+
+            if free_by or total_eq_usd:
+                break
+
+        # Direct REST fallback (sometimes cleaner on EEA)
+        if not free_by and self.ex is not None:
+            try:
+                raw = self.ex.privateGetAccountBalance({})
+                data = raw.get("data") or []
+                for acct in data:
+                    te = acct.get("totalEq")
+                    if te not in (None, ""):
+                        total_eq_usd = float(te)
+                    for d in acct.get("details") or []:
+                        ccy = str(d.get("ccy") or "").upper()
+                        if ccy not in assets:
+                            continue
+                        for key in ("availEq", "availBal", "cashBal", "eq", "eqUsd"):
+                            raw_v = d.get(key)
+                            if raw_v in (None, ""):
+                                continue
+                            val = float(raw_v)
+                            if val > 0:
+                                free_by[ccy] = max(free_by.get(ccy, 0.0), val)
+                                break
+            except Exception as e:
+                last_err = e
+                log.warning("privateGetAccountBalance: %s", e)
+
+        if not free_by and total_eq_usd is None:
+            if last_err:
+                log.warning("balance unavailable: %s", last_err)
+            return None
 
         total = sum(free_by.values())
+        # If per-ccy empty but totalEq exists, use that for readiness check
+        if total <= 0 and total_eq_usd is not None:
+            total = total_eq_usd
+            free_by["TOTAL_EQ_USD"] = total_eq_usd
+
         preferred = getattr(config, "MARGIN_ASSET", "USDC")
         log.info(
             "Margin free: %s | total≈$%.2f (prefer %s)",
@@ -348,7 +434,12 @@ class MexcExecutor:
             total,
             preferred,
         )
-        return {"total_free": total, "by_asset": free_by, "preferred": preferred}
+        return {
+            "total_free": total,
+            "by_asset": free_by,
+            "preferred": preferred,
+            "total_eq_usd": total_eq_usd,
+        }
 
     def has_open_position_on(self, symbol: str) -> bool:
         try:
