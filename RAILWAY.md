@@ -23,11 +23,18 @@ Remove old `BYBIT_*` / `MEXC_*` variables.
 - **Withdraw OFF**
 - Passphrase = the one you set when creating the key (not your login password)
 
+### Funding (USDC is OK)
+- On OKX multi-currency / EU accounts, **USDC is valid perp margin**
+- You do **not** need to convert to USDT
+- Keep USDC in **Trading / unified** with ≥ ~$50–60 free
+- Bot still trades linear perps; collateral can be **USDC**
+
 ### After deploy
 ```text
 OKX Oversold Bounce Bot starting
 Exchange=OKX swap
 AUTO_TRADE ON — live OKX orders
+Margin free: USDC=... total≈$...
 ```
 
-Telegram: `OKX Oversold Bounce Bot online`
+Telegram: `OKX Oversold Bounce Bot online` + balance including USDC
