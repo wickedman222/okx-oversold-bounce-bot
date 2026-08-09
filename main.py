@@ -245,6 +245,14 @@ def scan_once(
                     "not available in your",
                 )
             )
+            no_trade_perm = any(
+                x in reason.lower()
+                for x in (
+                    "50124",
+                    "does not have trading permission",
+                    "trading permission for the market",
+                )
+            )
             if geo:
                 md.block_symbol(best.symbol, "geo/region restricted")
                 state.cooldowns[best.symbol] = time.time() + 7 * 24 * 3600
@@ -254,6 +262,23 @@ def scan_once(
                     f"Exchange blocks opening this pair (region/product rule).\n"
                     f"Pair blacklisted this session — waiting for next setup."
                 )
+                return
+
+            if no_trade_perm:
+                md.block_symbol(best.symbol, "api no trade permission")
+                send_status(
+                    f"❌ OPEN BLOCKED (API permission)\n"
+                    f"Pair: {best.symbol}\n"
+                    f"OKX code 50124: this API key cannot trade this market.\n\n"
+                    f"Fix on OKX → API:\n"
+                    f"• Enable Trade (not Read-only)\n"
+                    f"• Enable futures / swap / perpetual if listed separately\n"
+                    f"• Create a new key if needed, update Railway vars, redeploy\n\n"
+                    f"Also avoid stock/metal products — bot will skip non-crypto more strictly."
+                )
+                # still send signal for awareness
+                send_signal(best)
+                append_signal(best)
                 return
 
             send_signal(best)

@@ -97,13 +97,25 @@ FORCE_PAIRS = [
 MIN_QUOTE_VOLUME_USD = _env_float("MIN_QUOTE_VOLUME_USD", "5000000")
 EXCLUDE_KEYWORDS = (
     "UP/", "DOWN/", "BULL", "BEAR", "3L", "3S", "5L", "5S",
-    "XAU/", "XAG/", "USOIL", "SP500", "NAS100", "US30",
+    # metals / energy / FX / indices
+    "XAU/", "XAG/", "XPT/", "XPD/", "XCU/",
+    "USOIL", "UKOIL", "WTI", "BRENT", "NATGAS", "USO/",
+    "SP500", "NAS100", "US30", "GER40", "HK50", "JP225",
     "EURUSD", "GBPUSD", "USDJPY", "BTCDOM",
-    "STOCK", "SPCX", "SPY/", "QQQ/",
+    # stock / ETF style perps
+    "STOCK", "SPCX", "SPY/", "QQQ/", "SOXL/", "SOXS/", "TQQQ/", "SQQQ/",
+    "IWM/", "DIA/", "SPX/", "TSLA/", "AAPL/", "NVDA/", "AMZN/", "META/",
+    "MSFT/", "GOOGL/", "COIN/", "MSTR/", "HOOD/", "PLTR/", "NFLX/", "AMD/",
 )
 EXCLUDE_BASES = frozenset({
-    "SPY", "QQQ", "IWM", "DIA", "SPX", "SPCXSTOCK",
-    "TSLA", "AAPL", "NVDA", "AMZN", "META", "MSFT",
+    # metals
+    "XAU", "XAG", "XPT", "XPD", "XCU",
+    # stock / ETF / leverage equity products
+    "SPY", "QQQ", "IWM", "DIA", "SPX", "SPCX", "SPCXSTOCK",
+    "SOXL", "SOXS", "TQQQ", "SQQQ", "TMF", "UVXY", "SMH", "XBI", "XLE",
+    "TSLA", "AAPL", "NVDA", "AMZN", "META", "MSFT", "GOOGL", "GOOG",
+    "COIN", "MSTR", "HOOD", "PLTR", "NFLX", "AMD", "INTC", "BABA",
+    "AMAT", "AVGO", "CRWD", "SNOW", "ORCL", "IBM", "NFLX",
 })
 
 # =============================================================================
