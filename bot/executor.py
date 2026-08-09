@@ -296,19 +296,59 @@ class MexcExecutor:
         return False
 
     def fetch_balance_usdt(self) -> Optional[float]:
+        """Total free stable margin (USDC+USDT+…) for multi-currency OKX accounts."""
+        detail = self.fetch_margin_balances()
+        if not detail:
+            return None
+        return detail.get("total_free")
+
+    def fetch_margin_balances(self) -> Optional[dict[str, Any]]:
+        """
+        OKX EU / multi-ccy: perps can be margined with USDC (and other stables),
+        even when the contract is quoted as USDT-SWAP.
+        """
         if not self.ex:
             return None
         try:
             bal = self.ex.fetch_balance()
-            usdt = bal.get("USDT") or {}
-            free = usdt.get("free")
-            if free is not None:
-                return float(free)
-            if usdt.get("total") is not None:
-                return float(usdt["total"])
         except Exception as e:
             log.warning("balance: %s", e)
-        return None
+            return None
+
+        free_by: dict[str, float] = {}
+        for asset in getattr(config, "MARGIN_ASSETS", ("USDC", "USDT")):
+            row = bal.get(asset) or {}
+            try:
+                free = row.get("free")
+                if free is None:
+                    free = row.get("total")
+                if free is not None:
+                    free_by[asset] = float(free)
+            except (TypeError, ValueError):
+                continue
+
+        # Also scan info for eq/availEq style fields if unified
+        try:
+            details = (bal.get("info") or {}).get("data") or []
+            if isinstance(details, list):
+                for d in details:
+                    ccy = str(d.get("ccy") or "").upper()
+                    if ccy in getattr(config, "MARGIN_ASSETS", ()):
+                        avail = d.get("availBal") or d.get("availEq") or d.get("cashBal")
+                        if avail is not None:
+                            free_by[ccy] = max(free_by.get(ccy, 0.0), float(avail))
+        except Exception:
+            pass
+
+        total = sum(free_by.values())
+        preferred = getattr(config, "MARGIN_ASSET", "USDC")
+        log.info(
+            "Margin free: %s | total≈$%.2f (prefer %s)",
+            " ".join(f"{k}={v:.2f}" for k, v in free_by.items()) or "none",
+            total,
+            preferred,
+        )
+        return {"total_free": total, "by_asset": free_by, "preferred": preferred}
 
     def has_open_position_on(self, symbol: str) -> bool:
         try:

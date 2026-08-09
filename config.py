@@ -65,11 +65,17 @@ LEVERAGE_MAX = min(10, _env_int("LEVERAGE_MAX", "10"))  # hard cap 10x for OKX
 LEVERAGE_DEFAULT = min(LEVERAGE_MAX, _env_int("LEVERAGE_DEFAULT", "5"))
 
 # =============================================================================
-# EXCHANGE — OKX USDT perpetual swaps
+# EXCHANGE — OKX perpetual swaps
+# Contracts are still BTC/USDT:USDT style (linear), but OKX multi-currency
+# accounts can margin them with USDC (common in EU) — no need for USDT cash.
 # =============================================================================
 EXCHANGE_ID = "okx"
 MARKET_TYPE = "swap"
 QUOTE = "USDT"
+# Preferred stable for balance checks / messaging (your deposit)
+MARGIN_ASSET = _env("MARGIN_ASSET", "USDC") or "USDC"
+# Accepted collateral for free-balance checks (multi-ccy)
+MARGIN_ASSETS = ("USDC", "USDT", "USDG", "USD")
 
 TOP_N_PAIRS = _env_int("TOP_N_PAIRS", "40")
 FORCE_PAIRS = [

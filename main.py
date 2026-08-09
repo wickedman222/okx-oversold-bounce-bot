@@ -385,18 +385,25 @@ def main() -> None:
             sys.exit(1)
 
     executor = build_executor()
-    bal = executor.fetch_balance_usdt() if executor.keys_ok else None
+    margin_info = executor.fetch_margin_balances() if executor.keys_ok else None
+    bal = margin_info["total_free"] if margin_info else None
     mode = "LIVE AUTO-TRADE (OKX)" if executor.enabled else "SIGNAL-ONLY"
-    bal_txt = f"${bal:.2f} free USDT" if bal is not None else "n/a"
+    if margin_info and margin_info.get("by_asset"):
+        parts = [f"{k} {v:.2f}" for k, v in margin_info["by_asset"].items()]
+        bal_txt = f"total≈${bal:.2f} free ({', '.join(parts)}) — USDC OK as perp collateral"
+    elif bal is not None:
+        bal_txt = f"${bal:.2f} free stable margin"
+    else:
+        bal_txt = "n/a"
 
     try:
         send_status(
             f"OKX Oversold Bounce Bot online "
             f"({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC)\n"
-            f"Exchange: OKX USDT perpetual\n"
+            f"Exchange: OKX perpetual (USDC/USDT multi-ccy margin)\n"
             f"Mode: {mode}\n"
             f"Fixed ${config.POSITION_SIZE_USD:.0f}/trade | max lev {config.LEVERAGE_MAX}x | 1 open\n"
-            f"Balance peek: {bal_txt}"
+            f"Balance: {bal_txt}"
         )
     except Exception:
         pass
@@ -412,13 +419,13 @@ def main() -> None:
 
     if executor.enabled and bal is not None and bal < config.POSITION_SIZE_USD:
         log.warning(
-            "Free USDT $%.2f < position size $%.0f — opens may fail",
+            "Free stable margin $%.2f < position size $%.0f — opens may fail",
             bal,
             config.POSITION_SIZE_USD,
         )
         send_status(
-            f"⚠️ Free balance ${bal:.2f} is below ${config.POSITION_SIZE_USD:.0f} margin. "
-            f"Top up futures wallet or opens will fail."
+            f"⚠️ Free margin ≈${bal:.2f} is below ${config.POSITION_SIZE_USD:.0f}. "
+            f"Top up USDC (or USDT) in Trading / multi-ccy account."
         )
 
     md = MarketData()
