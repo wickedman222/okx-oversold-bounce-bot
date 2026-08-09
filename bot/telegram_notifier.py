@@ -87,7 +87,7 @@ def format_signal(sig: Signal) -> str:
 ⚙️ <b>Leverage</b>
 • Recommended: <b>{sig.leverage}x</b> isolated
 • {_escape(sig.leverage_reason)}
-• Margin: <b>${sig.position_size_usd:.0f} USDT fixed</b> → notional ≈ <b>${sig.notional_usd:.0f}</b>
+• Margin: <b>${sig.position_size_usd:.0f} USDC fixed</b> → notional ≈ <b>${sig.notional_usd:.0f}</b>
 
 🛑 <b>Stop-Loss</b>
 • Price: <code>{_fmt_price(sig.stop)}</code>
@@ -101,7 +101,7 @@ def format_signal(sig: Signal) -> str:
 
 📐 <b>Risk : Reward</b> → TP2 = <b>1 : {sig.rr_tp2:.2f}</b>
 
-💰 <b>Trade size:</b> exactly <b>${sig.position_size_usd:.0f} USDT</b> margin per trade (not % of account). Max 1 trade open.
+💰 <b>Trade size:</b> exactly <b>${sig.position_size_usd:.0f} USDC</b> margin per trade (not % of account). Max 1 trade open.
 
 📊 <b>Snapshot</b>
 • RSI({config.RSI_PERIOD}): {sig.rsi:.1f}

@@ -3,7 +3,7 @@
 OKX Oversold Bounce Bot — signals + optional auto-trade
 =======================================================
 
-- FIXED $50 USDT margin per trade (POSITION_SIZE_USD)
+- FIXED $ margin per trade (POSITION_SIZE_USD) — USDC collateral on OKX
 - Max 1 open trade
 - AUTO_TRADE=true + OKX key/secret/passphrase → live isolated swaps
 - AUTO_TRADE=false → Telegram signals only
@@ -382,7 +382,7 @@ def main() -> None:
     log.info("=" * 60)
     log.info("OKX Oversold Bounce Bot starting")
     log.info(
-        "FIXED margin=$%.0f USDT per trade | max_open=%d | lev=%d–%d | scan=%ss",
+        "FIXED margin=$%.0f USDC per trade | max_open=%d | lev=%d–%d | scan=%ss",
         config.POSITION_SIZE_USD,
         config.MAX_OPEN_TRADES,
         config.LEVERAGE_MIN,
@@ -434,9 +434,9 @@ def main() -> None:
         send_status(
             f"OKX Oversold Bounce Bot online "
             f"({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC)\n"
-            f"Exchange: OKX perpetual (USDC/USDT multi-ccy margin)\n"
+            f"Exchange: OKX perpetual (margin in USDC)\n"
             f"Mode: {mode}\n"
-            f"Fixed ${config.POSITION_SIZE_USD:.0f}/trade | max lev {config.LEVERAGE_MAX}x | 1 open\n"
+            f"Fixed ${config.POSITION_SIZE_USD:.0f} USDC/trade | max lev {config.LEVERAGE_MAX}x | 1 open\n"
             f"Balance: {bal_txt}"
         )
     except Exception:
@@ -459,7 +459,7 @@ def main() -> None:
         )
         send_status(
             f"⚠️ Free margin ≈${bal:.2f} is below ${config.POSITION_SIZE_USD:.0f}. "
-            f"Top up USDC (or USDT) in Trading / multi-ccy account."
+            f"Top up USDC in Trading / multi-ccy account."
         )
 
     md = MarketData()

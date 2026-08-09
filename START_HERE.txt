@@ -2,7 +2,7 @@ OKX OVERSOLD BOUNCE BOT — START HERE
 ====================================
 
 RULES (locked in):
-  - Exactly $50 USDT margin PER TRADE (not a % of balance)
+  - Fixed USDC margin PER TRADE (POSITION_SIZE_USD on Railway; not a % of balance)
   - Only 1 trade open at a time
   - Phase 1: Telegram signals only
   - MEXC API keys: leave empty until Phase 2 → set on Railway Variables tab

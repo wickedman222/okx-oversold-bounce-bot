@@ -60,7 +60,7 @@ class MexcExecutor:
                     log.warning("Private markets: %s", e)
         if self.enabled:
             log.warning(
-                "AUTO_TRADE ON — live OKX orders | margin=$%.0f isolated",
+                "AUTO_TRADE ON — live OKX orders | margin=$%.0f USDC isolated",
                 config.POSITION_SIZE_USD,
             )
         elif self.keys_ok:
@@ -651,10 +651,11 @@ def format_trade_opened(sig: Signal, trade: OpenSignal, warnings: Optional[list]
         f"TP1 (soft): {_fmt_px(trade.tp1)} (~{config.TP1_SIZE_PCT}%)",
         f"TP2: {_fmt_px(trade.tp2)}",
         f"Leverage: {trade.leverage}x isolated",
-        f"Margin≈ ${trade.margin_usd:.2f} (target ${config.POSITION_SIZE_USD:.0f})",
+        f"Margin≈ ${trade.margin_usd:.2f} USDC (target ${config.POSITION_SIZE_USD:.0f})",
         f"Contracts: {trade.contracts:g} | Notional≈ ${trade.notional_usd:.2f}",
         f"Confidence: {sig.confidence:.0f}/100",
         f"Chart: https://www.okx.com/trade-swap/{inst.lower()}",
+        "Margin currency: USDC (OKX multi-ccy). Pair name may still show USDT.",
         "OKX SL/TP attached + software backup.",
     ]
     if warnings:
