@@ -451,6 +451,18 @@ def main() -> None:
         )
         sys.exit(1)
 
+    # One-shot smoke test (remove OKX_SMOKE_TEST after — temporary)
+    if os.getenv("OKX_SMOKE_TEST", "").lower() in ("1", "true", "yes", "on"):
+        from bot.smoke_test import run_okx_smoke_test
+
+        log.warning("OKX_SMOKE_TEST enabled — running tiny open/close then normal bot")
+        try:
+            run_okx_smoke_test(executor)
+        except Exception as e:
+            log.error("smoke test crashed: %s", e)
+            send_status(f"🧪 OKX smoke CRASH: {e}")
+        log.warning("Smoke finished — set OKX_SMOKE_TEST=false and redeploy to disable")
+
     if executor.enabled and bal is not None and bal < config.POSITION_SIZE_USD:
         log.warning(
             "Free stable margin $%.2f < position size $%.0f — opens may fail",
