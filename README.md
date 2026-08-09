@@ -1,4 +1,4 @@
-# Bybit Oversold Bounce Bot
+# OKX Oversold Bounce Bot
 
 High-selectivity **LONG-only** crypto futures **signal bot**.  
 Scans liquid MEXC USDT-M perps → Telegram with entry / SL / multi-TP / **variable leverage**.

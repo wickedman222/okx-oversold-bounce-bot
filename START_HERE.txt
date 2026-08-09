@@ -1,5 +1,5 @@
-BYBIT OVERSOLD BOUNCE BOT — START HERE
-======================================
+OKX OVERSOLD BOUNCE BOT — START HERE
+====================================
 
 RULES (locked in):
   - Exactly $50 USDT margin PER TRADE (not a % of balance)

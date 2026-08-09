@@ -1,35 +1,31 @@
-# Bybit Oversold Bounce Bot — Railway
+# OKX Oversold Bounce Bot — Railway
 
-## Variables (Raw Editor)
+## Variables (click the **service** → **Variables** → Raw Editor)
 
 ```env
-BYBIT_API_KEY=your_key
-BYBIT_API_SECRET=your_secret
+OKX_API_KEY=your_key
+OKX_API_SECRET=your_secret
+OKX_API_PASSWORD=your_api_passphrase
 AUTO_TRADE=true
 POSITION_SIZE_USD=50
 SCAN_INTERVAL_SEC=600
 IN_TRADE_POLL_SEC=120
 ```
 
-**Remove old MEXC keys** if still present (or leave them; bot prefers `BYBIT_*`).
+**Important:** OKX needs **3** secrets — key, secret, **and passphrase** (`OKX_API_PASSWORD`).
 
-### Bybit API key settings
-- Permissions: **Contract / Unified trading** (read + trade)
-- **Withdraw: OFF**
-- IP whitelist: optional (Railway IPs change — often leave open)
+Remove old `BYBIT_*` / `MEXC_*` variables.
 
-### Funding
-- Fund **USDT** on Bybit **Unified / Derivatives** wallet
-- Need at least ~$50–60 free for one $50 margin trade
+### OKX API key
+- Trade / read futures (swap)
+- **Withdraw OFF**
+- Passphrase = the one you set when creating the key (not your login password)
 
-## After deploy
-Logs should show:
+### After deploy
 ```text
-Exchange=Bybit linear
-AUTO_TRADE ON — live BYBIT orders | margin=$50 isolated
+OKX Oversold Bounce Bot starting
+Exchange=OKX swap
+AUTO_TRADE ON — live OKX orders
 ```
 
-Telegram: `Exchange: BYBIT USDT linear`
-
-## Phase 1 signal-only
-Omit keys or `AUTO_TRADE=false` — still scans Bybit public markets and sends TG.
+Telegram: `OKX Oversold Bounce Bot online`

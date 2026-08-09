@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Bybit Oversold Bounce Bot — signals + optional auto-trade
-=========================================================
+OKX Oversold Bounce Bot — signals + optional auto-trade
+=======================================================
 
 - FIXED $50 USDT margin per trade (POSITION_SIZE_USD)
 - Max 1 open trade
-- AUTO_TRADE=true + BYBIT keys → live isolated linear orders with SL/TP
+- AUTO_TRADE=true + OKX key/secret/passphrase → live isolated swaps
 - AUTO_TRADE=false → Telegram signals only
 """
 
@@ -295,7 +295,7 @@ def scan_once(
                 f"Entry was sent with native SL={trade.stop} / TP2={trade.tp2}.\n"
                 f"Check MEXC position for SL/TP. Bot also manages exits in software "
                 f"(~every {config.IN_TRADE_POLL_SEC}s).\n"
-                f"If no SL on Bybit UI → set manually now."
+                f"If no SL on OKX UI → set manually now."
             )
         return
 
@@ -328,7 +328,7 @@ def start_health_server() -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
             body = (
-                f"ok\nbybit-oversold-bounce-bot\n"
+                f"ok\nokx-oversold-bounce-bot\n"
                 f"position_usd={config.POSITION_SIZE_USD}\n"
                 f"max_open={config.MAX_OPEN_TRADES}\n"
                 f"auto_trade={config.AUTO_TRADE}\n"
@@ -355,7 +355,7 @@ def start_health_server() -> None:
 
 def main() -> None:
     log.info("=" * 60)
-    log.info("Bybit Oversold Bounce Bot starting")
+    log.info("OKX Oversold Bounce Bot starting")
     log.info(
         "FIXED margin=$%.0f USDT per trade | max_open=%d | lev=%d–%d | scan=%ss",
         config.POSITION_SIZE_USD,
@@ -364,13 +364,17 @@ def main() -> None:
         config.LEVERAGE_MAX,
         config.SCAN_INTERVAL_SEC,
     )
+    keys_ok = bool(
+        config.OKX_API_KEY and config.OKX_API_SECRET and config.OKX_API_PASSWORD
+    )
     log.info(
-        "dry_run=%s | auto_trade=%s | mexc_keys=%s",
+        "dry_run=%s | auto_trade=%s | okx_keys=%s | passphrase=%s",
         config.DRY_RUN,
         config.AUTO_TRADE,
-        "set" if (config.BYBIT_API_KEY and config.BYBIT_API_SECRET) else "NOT SET",
+        "set" if (config.OKX_API_KEY and config.OKX_API_SECRET) else "NOT SET",
+        "set" if config.OKX_API_PASSWORD else "MISSING",
     )
-    log.info("Exchange=Bybit linear | Telegram chat=%s", config.TELEGRAM_CHAT_ID)
+    log.info("Exchange=OKX swap | Telegram chat=%s", config.TELEGRAM_CHAT_ID)
     log.info("=" * 60)
 
     start_health_server()
@@ -382,14 +386,14 @@ def main() -> None:
 
     executor = build_executor()
     bal = executor.fetch_balance_usdt() if executor.keys_ok else None
-    mode = "LIVE AUTO-TRADE (BYBIT)" if executor.enabled else "SIGNAL-ONLY"
+    mode = "LIVE AUTO-TRADE (OKX)" if executor.enabled else "SIGNAL-ONLY"
     bal_txt = f"${bal:.2f} free USDT" if bal is not None else "n/a"
 
     try:
         send_status(
-            f"Bybit Oversold Bounce Bot online "
+            f"OKX Oversold Bounce Bot online "
             f"({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC)\n"
-            f"Exchange: BYBIT USDT linear\n"
+            f"Exchange: OKX USDT swap\n"
             f"Mode: {mode}\n"
             f"Fixed ${config.POSITION_SIZE_USD:.0f}/trade | 1 open max\n"
             f"Balance peek: {bal_txt}"
@@ -398,10 +402,11 @@ def main() -> None:
         pass
 
     if config.AUTO_TRADE and not executor.keys_ok:
-        log.error("AUTO_TRADE=true but BYBIT keys missing — refusing to run live")
+        log.error("AUTO_TRADE=true but OKX credentials incomplete")
         send_status(
-            "⚠️ AUTO_TRADE=true but BYBIT_API_KEY/SECRET missing. "
-            "Set keys on Railway or set AUTO_TRADE=false."
+            "⚠️ AUTO_TRADE=true but OKX credentials incomplete.\n"
+            "Set OKX_API_KEY, OKX_API_SECRET, and OKX_API_PASSWORD (passphrase) "
+            "on Railway Variables."
         )
         sys.exit(1)
 
