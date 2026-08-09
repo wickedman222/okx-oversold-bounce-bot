@@ -115,10 +115,32 @@ def run_okx_smoke_test(executor: MexcExecutor) -> dict[str, Any]:
         step(f"OPEN ok id={oid}")
     except Exception as e:
         step(f"FAIL open: {e}")
+        extra = ""
+        if "50124" in str(e):
+            # List what this key can trade (if any)
+            try:
+                raw = ex.privateGetAccountInstruments({"instType": "SWAP"})
+                ids = [d.get("instId") for d in (raw.get("data") or [])[:15]]
+                step(f"account tradeable SWAP sample: {ids}")
+                extra = (
+                    "\n\nOKX 50124 = API key cannot trade this market.\n"
+                    "Fix:\n"
+                    "1) OKX → API → enable **Trade** (not read-only)\n"
+                    "2) Enable **futures/swap/perp** if shown separately\n"
+                    "3) Recreate key after enabling perps, update Railway\n"
+                    "4) Pair name BTC-USDT-SWAP is normal — margin can still be **USDC** "
+                    "(not the same as needing USDT cash)\n"
+                    f"Tradeable sample: {ids or 'none returned'}"
+                )
+            except Exception as e2:
+                extra = (
+                    f"\n\n50124 + could not list instruments: {e2}\n"
+                    "Almost certainly missing **Trade** permission on the API key."
+                )
         send_status(
             f"🧪 OKX smoke FAIL on OPEN\n"
-            f"{symbol} qty={qty}\n{e}\n\n"
-            f"If 50124: enable Trade + futures on the API key."
+            f"{symbol} qty={qty}\n{e}"
+            f"{extra}"
         )
         result["error"] = str(e)
         return result

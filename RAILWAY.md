@@ -21,9 +21,17 @@ IN_TRADE_POLL_SEC=120
 Remove old `BYBIT_*` / `MEXC_*` variables.
 
 ### OKX API key
-- Trade / read futures (swap)
+- **Trade** + **Read** (Trade is required — Read alone → error **50124**)
+- Futures / swap / perpetual must be allowed if the UI lists them separately
 - **Withdraw OFF**
-- Passphrase = the one you set when creating the key (not your login password)
+- Passphrase = set when creating the key
+- Recreate the key **after** you activated perps (old keys may lack market access)
+
+### USDC vs USDT (important for EU)
+- You margin with **USDC** — correct
+- Pair IDs still look like `BTC-USDT-SWAP` / `BTC/USDT:USDT` — that is the **contract name**, not “you must hold USDT”
+- On multi-ccy OKX, settlement/margin can be **USDC** while the instrument id contains USDT
+- Error **50124** is **API trade permission**, not “wrong coin name”
 
 ### Funding (USDC is OK)
 - On OKX multi-currency / EU accounts, **USDC is valid perp margin**
