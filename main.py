@@ -164,12 +164,15 @@ def scan_once(
 
     btc_rsi = None
     if config.BTC_FILTER_ENABLED:
+        from bot.xperp import resolve_btc_symbol
+
+        btc_sym = resolve_btc_symbol(md.ex)
         btc_df = md.fetch_ohlcv_df(
-            config.BTC_SYMBOL, config.SIGNAL_TIMEFRAME, config.CANDLE_LIMIT_SIGNAL
+            btc_sym, config.SIGNAL_TIMEFRAME, config.CANDLE_LIMIT_SIGNAL
         )
         if btc_df is not None and len(btc_df) > config.RSI_PERIOD + 2:
             btc_rsi = float(rsi(btc_df["close"], config.RSI_PERIOD).iloc[-1])
-            log.info("BTC %s RSI=%.1f", config.SIGNAL_TIMEFRAME, btc_rsi)
+            log.info("BTC X-Perp %s RSI=%.1f (%s)", config.SIGNAL_TIMEFRAME, btc_rsi, btc_sym)
 
     candidates: list[Signal] = []
     scanned = 0
@@ -434,7 +437,7 @@ def main() -> None:
         send_status(
             f"OKX Oversold Bounce Bot online "
             f"({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC)\n"
-            f"Exchange: OKX perpetual (margin in USDC)\n"
+            f"Exchange: OKX Europe X-Perps (USDC margin)\n"
             f"Mode: {mode}\n"
             f"Fixed ${config.POSITION_SIZE_USD:.0f} USDC/trade | max lev {config.LEVERAGE_MAX}x | 1 open\n"
             f"Balance: {bal_txt}"

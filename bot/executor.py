@@ -60,7 +60,7 @@ class MexcExecutor:
                     log.warning("Private markets: %s", e)
         if self.enabled:
             log.warning(
-                "AUTO_TRADE ON — live OKX orders | margin=$%.0f USDC isolated",
+                "AUTO_TRADE ON — live OKX Europe X-Perps | margin=$%.0f USDC isolated",
                 config.POSITION_SIZE_USD,
             )
         elif self.keys_ok:
@@ -91,6 +91,7 @@ class MexcExecutor:
             params: dict[str, Any] = {
                 "tdMode": "isolated",
                 "marginMode": "isolated",
+                # X-Perps are instType FUTURES (ccxt market.type usually 'future')
                 "stopLoss": {
                     "triggerPrice": sl_px,
                     "type": "market",

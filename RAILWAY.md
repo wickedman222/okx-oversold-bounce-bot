@@ -27,11 +27,11 @@ Remove old `BYBIT_*` / `MEXC_*` variables.
 - Passphrase = set when creating the key
 - Recreate the key **after** you activated perps (old keys may lack market access)
 
-### USDC vs USDT (important for EU)
-- You margin with **USDC** — correct
-- Pair IDs still look like `BTC-USDT-SWAP` / `BTC/USDT:USDT` — that is the **contract name**, not “you must hold USDT”
-- On multi-ccy OKX, settlement/margin can be **USDC** while the instrument id contains USDT
-- Error **50124** is **API trade permission**, not “wrong coin name”
+### OKX Europe = X-Perps (not global USDT-SWAP)
+- EEA accounts **cannot** trade global `BTC-USDT-SWAP` via API → error **50124**
+- Bot uses **X-Perps**: e.g. `BTC-USD_UM_XPERP-…` / `BTC/USD:USD-…`
+- Margin in **USDC** (USD-margined linear) — correct for EU
+- You do **not** need USDT
 
 ### Funding (USDC is OK)
 - On OKX multi-currency / EU accounts, **USDC is valid perp margin**

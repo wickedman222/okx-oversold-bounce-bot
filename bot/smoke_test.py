@@ -20,13 +20,7 @@ from bot.telegram_notifier import send_status
 
 log = logging.getLogger("bot.smoke")
 
-# Prefer liquid majors with small min notional
-_SMOKE_SYMBOLS = (
-    "BTC/USDT:USDT",
-    "ETH/USDT:USDT",
-    "SOL/USDT:USDT",
-    "DOGE/USDT:USDT",
-)
+# Filled at runtime from live X-Perp list (EU cannot trade USDT-SWAP)
 
 
 def run_okx_smoke_test(executor: MexcExecutor) -> dict[str, Any]:
@@ -61,10 +55,14 @@ def run_okx_smoke_test(executor: MexcExecutor) -> dict[str, Any]:
         send_status(f"🧪 OKX smoke FAIL at balance:\n{e}")
         return result
 
-    # --- pick symbol + min size ---
+    # --- pick symbol + min size (OKX Europe X-Perps only) ---
+    from bot.xperp import build_xperp_watchlist
+
+    smoke_symbols = build_xperp_watchlist(ex, top_n=15)
+    step(f"xperp candidates: {smoke_symbols[:6]}")
     symbol = None
     qty = None
-    for sym in _SMOKE_SYMBOLS:
+    for sym in smoke_symbols:
         try:
             if sym not in ex.markets:
                 continue
