@@ -59,9 +59,10 @@ TELEGRAM_CHAT_ID = _env("TELEGRAM_CHAT_ID", "-1004326901305")
 # =============================================================================
 POSITION_SIZE_USD = _env_float("POSITION_SIZE_USD", "50")
 MAX_OPEN_TRADES = _env_int("MAX_OPEN_TRADES", "1")
+# OKX account perp cap (your activation: up to 10x)
 LEVERAGE_MIN = _env_int("LEVERAGE_MIN", "3")
-LEVERAGE_MAX = _env_int("LEVERAGE_MAX", "12")
-LEVERAGE_DEFAULT = _env_int("LEVERAGE_DEFAULT", "5")
+LEVERAGE_MAX = min(10, _env_int("LEVERAGE_MAX", "10"))  # hard cap 10x for OKX
+LEVERAGE_DEFAULT = min(LEVERAGE_MAX, _env_int("LEVERAGE_DEFAULT", "5"))
 
 # =============================================================================
 # EXCHANGE — OKX USDT perpetual swaps

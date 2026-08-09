@@ -393,9 +393,9 @@ def main() -> None:
         send_status(
             f"OKX Oversold Bounce Bot online "
             f"({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC)\n"
-            f"Exchange: OKX USDT swap\n"
+            f"Exchange: OKX USDT perpetual\n"
             f"Mode: {mode}\n"
-            f"Fixed ${config.POSITION_SIZE_USD:.0f}/trade | 1 open max\n"
+            f"Fixed ${config.POSITION_SIZE_USD:.0f}/trade | max lev {config.LEVERAGE_MAX}x | 1 open\n"
             f"Balance peek: {bal_txt}"
         )
     except Exception:

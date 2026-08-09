@@ -77,8 +77,11 @@ class MexcExecutor:
             if self.has_open_position_on(sig.symbol):
                 return {"ok": False, "reason": "position_already_open"}
 
-            self._set_leverage(sig.symbol, sig.leverage)
-            qty = self._size_contracts(sig.symbol, sig.entry, sig.leverage)
+            # Respect OKX account max (10x)
+            lev = int(max(config.LEVERAGE_MIN, min(config.LEVERAGE_MAX, sig.leverage)))
+            self._ensure_net_mode()
+            self._set_leverage(sig.symbol, lev)
+            qty = self._size_contracts(sig.symbol, sig.entry, lev)
             try:
                 sl_px = float(self.ex.price_to_precision(sig.symbol, sig.stop))
                 tp_px = float(self.ex.price_to_precision(sig.symbol, sig.tp2))
@@ -88,7 +91,6 @@ class MexcExecutor:
             params: dict[str, Any] = {
                 "tdMode": "isolated",
                 "marginMode": "isolated",
-                # one-way mode: omit posSide or net
                 "stopLoss": {
                     "triggerPrice": sl_px,
                     "type": "market",
@@ -100,10 +102,11 @@ class MexcExecutor:
             }
 
             log.info(
-                "OPEN LONG %s qty=%s lev=%dx margin=$%.0f SL=%s TP2=%s",
+                "OPEN LONG %s qty=%s lev=%dx (cap %dx) margin=$%.0f SL=%s TP2=%s",
                 sig.symbol,
                 qty,
-                sig.leverage,
+                lev,
+                config.LEVERAGE_MAX,
                 config.POSITION_SIZE_USD,
                 sl_px,
                 tp_px,
@@ -127,7 +130,7 @@ class MexcExecutor:
             m = self.ex.market(sig.symbol)
             csize = float(m.get("contractSize") or 1)
             notional = qty * csize * fill
-            margin = notional / max(sig.leverage, 1)
+            margin = notional / max(lev, 1)
 
             trade = OpenSignal(
                 symbol=sig.symbol,
@@ -137,7 +140,7 @@ class MexcExecutor:
                 tp1=sig.tp1,
                 tp2=sig.tp2,
                 tp3=sig.tp3,
-                leverage=sig.leverage,
+                leverage=lev,
                 confidence=sig.confidence,
                 reason_short="; ".join(sig.reasons[:3]),
                 contracts=qty,
@@ -314,14 +317,24 @@ class MexcExecutor:
         except Exception:
             return False
 
-    def _set_leverage(self, symbol: str, leverage: int) -> None:
+    def _ensure_net_mode(self) -> None:
+        """Prefer one-way (net) position mode — simpler for this bot."""
         assert self.ex is not None
         try:
-            self.ex.set_margin_mode("isolated", symbol)
+            self.ex.set_position_mode(False)  # False = one-way / net
+            log.info("OKX position mode: one-way (net)")
+        except Exception as e:
+            log.debug("set_position_mode: %s (ok if already set or open positions)", e)
+
+    def _set_leverage(self, symbol: str, leverage: int) -> None:
+        assert self.ex is not None
+        lev = int(max(1, min(10, leverage)))  # account hard cap 10x
+        try:
+            self.ex.set_margin_mode("isolated", symbol, {"lever": lev})
         except Exception as e:
             log.debug("set_margin_mode: %s", e)
         try:
-            self.ex.set_leverage(leverage, symbol, {"mgnMode": "isolated"})
+            self.ex.set_leverage(lev, symbol, {"mgnMode": "isolated"})
         except Exception as e:
             log.warning("set_leverage: %s", e)
 

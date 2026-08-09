@@ -8,11 +8,13 @@ OKX_API_SECRET=your_secret
 OKX_API_PASSWORD=your_api_passphrase
 AUTO_TRADE=true
 POSITION_SIZE_USD=50
+LEVERAGE_MAX=10
 SCAN_INTERVAL_SEC=600
 IN_TRADE_POLL_SEC=120
 ```
 
-**Important:** OKX needs **3** secrets — key, secret, **and passphrase** (`OKX_API_PASSWORD`).
+**Important:** OKX needs **3** secrets — key, secret, **and passphrase** (`OKX_API_PASSWORD`).  
+**Leverage:** hard-capped at **10x** (matches OKX perp activation).
 
 Remove old `BYBIT_*` / `MEXC_*` variables.
 

@@ -40,8 +40,8 @@ def recommend_leverage(
       - Never recommend lev where SL is past ~70% of liquidation buffer
         (rough: liq ≈ 100/lev %; we want SL_pct * 1.3 < 100/lev)
     """
-    lo, hi = config.LEVERAGE_MIN, config.LEVERAGE_MAX
-    base = config.LEVERAGE_DEFAULT
+    lo, hi = config.LEVERAGE_MIN, min(10, config.LEVERAGE_MAX)  # OKX perp max 10x
+    base = min(hi, config.LEVERAGE_DEFAULT)
 
     # Volatility score: 0 calm → 100 wild (ATR% typical crypto 0.5–4% on 15m)
     vol_score = min(100.0, max(0.0, (atr_pct - 0.4) / 3.0 * 100.0))
