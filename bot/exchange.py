@@ -23,9 +23,12 @@ TICKER_RETRIES = 4
 
 
 def make_exchange(private: bool = False) -> ccxt.Exchange:
+    # EEA (Netherlands etc.): eea.okx.com — required or private calls return 50119
+    hostname = getattr(config, "OKX_HOSTNAME", "eea.okx.com") or "eea.okx.com"
     params: dict[str, Any] = {
         "enableRateLimit": True,
         "timeout": config.REQUEST_TIMEOUT * 1000,
+        "hostname": hostname,
         "options": {
             "defaultType": config.MARKET_TYPE,  # swap
             "defaultMarginMode": config.MARGIN_MODE,
@@ -37,7 +40,9 @@ def make_exchange(private: bool = False) -> ccxt.Exchange:
         # OKX requires the API passphrase
         if config.OKX_API_PASSWORD:
             params["password"] = config.OKX_API_PASSWORD
-    return getattr(ccxt, config.EXCHANGE_ID)(params)
+    ex = getattr(ccxt, config.EXCHANGE_ID)(params)
+    log.info("OKX API host: %s (private=%s)", hostname, private)
+    return ex
 
 
 class MarketData:

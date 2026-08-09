@@ -374,7 +374,11 @@ def main() -> None:
         "set" if (config.OKX_API_KEY and config.OKX_API_SECRET) else "NOT SET",
         "set" if config.OKX_API_PASSWORD else "MISSING",
     )
-    log.info("Exchange=OKX swap | Telegram chat=%s", config.TELEGRAM_CHAT_ID)
+    log.info(
+        "Exchange=OKX swap | host=%s | Telegram chat=%s",
+        getattr(config, "OKX_HOSTNAME", "eea.okx.com"),
+        config.TELEGRAM_CHAT_ID,
+    )
     log.info("=" * 60)
 
     start_health_server()

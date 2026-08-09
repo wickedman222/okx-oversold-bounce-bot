@@ -6,6 +6,7 @@
 OKX_API_KEY=your_key
 OKX_API_SECRET=your_secret
 OKX_API_PASSWORD=your_api_passphrase
+OKX_HOSTNAME=eea.okx.com
 AUTO_TRADE=true
 POSITION_SIZE_USD=50
 LEVERAGE_MAX=10
@@ -14,6 +15,7 @@ IN_TRADE_POLL_SEC=120
 ```
 
 **Important:** OKX needs **3** secrets — key, secret, **and passphrase** (`OKX_API_PASSWORD`).  
+**EEA/NL:** use host **`eea.okx.com`** (default). Error `50119 API key doesn't exist` = wrong region host.  
 **Leverage:** hard-capped at **10x** (matches OKX perp activation).
 
 Remove old `BYBIT_*` / `MEXC_*` variables.

@@ -72,6 +72,9 @@ LEVERAGE_DEFAULT = min(LEVERAGE_MAX, _env_int("LEVERAGE_DEFAULT", "5"))
 EXCHANGE_ID = "okx"
 MARKET_TYPE = "swap"
 QUOTE = "USDT"
+# EEA/NL accounts MUST use eea.okx.com or private API returns 50119 "API key doesn't exist"
+# Global accounts: set OKX_HOSTNAME=www.okx.com
+OKX_HOSTNAME = _env("OKX_HOSTNAME", "eea.okx.com") or "eea.okx.com"
 # Preferred stable for balance checks / messaging (your deposit)
 MARGIN_ASSET = _env("MARGIN_ASSET", "USDC") or "USDC"
 # Accepted collateral for free-balance checks (multi-ccy)
