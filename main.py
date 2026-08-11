@@ -100,12 +100,19 @@ def manage_open_trade(
             if not trade.sl_order_id:
                 arm.append("SL re-arm failed")
             if not trade.tp2_order_id:
-                arm.append("TP2 re-arm failed — set TP manually on MEXC")
+                arm.append("TP2 re-arm failed — set TP on OKX if missing")
             extra = (" | " + "; ".join(arm)) if arm else " | SL/TP2 re-armed for runner"
             send_status(
                 f"🎯 TP1 partial on {symbol}\n"
                 f"Closed ~{config.TP1_SIZE_PCT}% | remaining {trade.contracts_remaining:g}\n"
                 f"Runner toward TP2={trade.tp2}{extra}"
+            )
+            return
+        if reason == "tp1_skip_hold":
+            state.save()
+            send_status(
+                f"🎯 TP1 price reached on {symbol} but position too small to partial "
+                f"(X-Perp whole contracts).\nHolding full size for TP2={trade.tp2}."
             )
             return
         if reason in ("exchange_flat", "stop_hit", "tp2_hit"):

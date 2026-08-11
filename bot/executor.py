@@ -197,21 +197,46 @@ class MexcExecutor:
             not trade.tp1_done
             and rem > 0
             and trade.tp1 > 0
+            and trade.direction == "LONG"
             and px >= trade.tp1 + buf
         ):
+            # X-Perps are often whole contracts (minSz=1). Don't use raw 40% float
+            # that floors to 0 or leaves no runner — take max(1, floor(rem*frac)).
             frac = max(0.2, min(0.6, config.TP1_SIZE_PCT / 100.0))
-            q = rem * frac
-            try:
-                q = float(self.ex.amount_to_precision(trade.symbol, q))
-            except Exception:
-                q = round(q, 4)
             mn = float(
                 (self.ex.market(trade.symbol).get("limits") or {})
                 .get("amount", {})
                 .get("min")
-                or 0
+                or 1
             )
-            if q >= mn and (rem - q) >= mn * 0.99:
+            # Prefer integer-friendly partial
+            raw_q = rem * frac
+            try:
+                q = float(self.ex.amount_to_precision(trade.symbol, raw_q))
+            except Exception:
+                q = math.floor(raw_q) if rem >= 2 else 0.0
+
+            # Ensure at least 1 lot if we have room for a runner
+            if rem >= 2 * mn:
+                if q < mn:
+                    q = mn
+                # Keep at least min remaining for runner
+                if rem - q < mn:
+                    q = rem - mn
+                try:
+                    q = float(self.ex.amount_to_precision(trade.symbol, q))
+                except Exception:
+                    pass
+
+            can_partial = q >= mn and (rem - q) >= mn * 0.99
+            if can_partial:
+                log.info(
+                    "TP1 hit px=%.6g >= %.6g — partial close qty=%s of rem=%s",
+                    px,
+                    trade.tp1,
+                    q,
+                    rem,
+                )
                 if self.market_close(trade, q):
                     time.sleep(0.6)
                     still2, rem2 = self._position_remaining(trade.symbol)
@@ -231,8 +256,19 @@ class MexcExecutor:
                     except Exception as e:
                         log.error("TP1 re-arm: %s", e)
                     return "tp1_partial"
+                log.warning("TP1 partial close failed for %s", trade.symbol)
             else:
-                trade.tp1_done = True
+                # Cannot partial (tiny position) — hold full size for TP2; do NOT
+                # mark tp1_done forever without logging (old bug skipped TP1 silently)
+                log.info(
+                    "TP1 level reached but size too small to partial "
+                    "(rem=%s q=%s min=%s) — holding for TP2",
+                    rem,
+                    q,
+                    mn,
+                )
+                trade.tp1_done = True  # avoid retry spam; full size runs to TP2
+                return "tp1_skip_hold"
 
         if trade.tp2 > 0 and px >= trade.tp2 + buf:
             if self.close_all_remaining(trade):
@@ -555,18 +591,36 @@ class MexcExecutor:
         if positions is None:
             raise RuntimeError(f"fetch_positions: {last_err}")
 
+        m_id = ""
+        try:
+            m_id = str(self.ex.market(symbol).get("id") or "")
+        except Exception:
+            m_id = ""
+        # X-Perp family e.g. BTC-USD_UM_XPERP from BTC-USD_UM_XPERP-310404
+        family = ""
+        if "XPERP" in m_id:
+            family = m_id.rsplit("-", 1)[0] if m_id.count("-") >= 2 else m_id
+
         for p in positions or []:
             info = p.get("info") or {}
             sym = str(p.get("symbol") or "")
             inst = str(info.get("instId") or "")
-            m_id = ""
-            try:
-                m_id = self.ex.market(symbol).get("id") or ""
-            except Exception:
-                pass
-            if symbol not in sym and inst not in (m_id, symbol) and m_id not in (inst, sym):
-                if not (m_id and m_id == inst):
+            matched = (
+                symbol == sym
+                or symbol in sym
+                or (m_id and m_id == inst)
+                or (m_id and m_id in inst)
+                or (family and family in inst)
+                or (inst and inst in symbol)
+            )
+            if not matched:
+                # base match for X-Perp: BTC from BTC/USD:USD-310404
+                base = symbol.split("/")[0] if "/" in symbol else ""
+                if not (base and (inst.startswith(base + "-") or base + "/" in sym)):
                     continue
+                if "XPERP" not in inst.upper() and "XPERP" not in m_id.upper():
+                    if m_id and inst != m_id:
+                        continue
             c = abs(float(p.get("contracts") or 0))
             if c == 0:
                 try:
@@ -578,7 +632,6 @@ class MexcExecutor:
             side = (p.get("side") or info.get("posSide") or "").lower()
             if side in ("short", "sell"):
                 continue
-            # net mode long: pos > 0
             return True, c
         return False, 0.0
 
