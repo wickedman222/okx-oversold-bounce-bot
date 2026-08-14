@@ -157,14 +157,25 @@ ATR_PERIOD = 14
 SL_ATR_MULT = 1.4
 MIN_SL_PCT = 0.6
 MAX_SL_PCT = 3.5
+# R-multiple floors (structure targets can extend beyond these)
 TP1_R = 1.2
 TP2_R = 2.2
 TP3_R = 3.5
-TP1_SIZE_PCT = 40
-TP2_SIZE_PCT = 40
-TP3_SIZE_PCT = 20
+TP1_SIZE_PCT = 35  # bank a bit less so more can run
+TP2_SIZE_PCT = 35
+TP3_SIZE_PCT = 30  # runner remainder
 MIN_RR_TO_TP2 = 1.8
 MIN_CONFIDENCE = _env_float("MIN_CONFIDENCE", "68")
+
+# Structure-based SL / TP (swing lows & highs + BB mid)
+USE_STRUCTURE_TARGETS = True
+SWING_LOOKBACK = 24
+RESISTANCE_LOOKBACK = 48
+# After TP1: trail runner under peak - ATR*mult (lets winners run)
+TRAIL_AFTER_TP1 = True
+TRAIL_ATR_MULT = 1.6
+# High-confidence setups: trail past TP2 instead of full exit at TP2
+RUNNER_IF_CONF_GE = 78
 
 PAIR_COOLDOWN_HOURS = _env_float("PAIR_COOLDOWN_HOURS", "8")
 TRADE_LOCK_MAX_HOURS = _env_float("TRADE_LOCK_MAX_HOURS", "12")

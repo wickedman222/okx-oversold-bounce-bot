@@ -21,7 +21,12 @@ from typing import Optional
 import pandas as pd
 
 import config
-from bot.indicators import atr_pct, enrich
+from bot.indicators import (
+    atr_pct,
+    enrich,
+    recent_swing_low,
+    resistance_levels,
+)
 from bot.leverage import LeverageAdvice, recommend_leverage
 
 log = logging.getLogger("bot.scanner")
@@ -57,6 +62,8 @@ class Signal:
     notes: list[str] = field(default_factory=list)
     timeframe: str = config.SIGNAL_TIMEFRAME
     trend_timeframe: str = config.TREND_TIMEFRAME
+    allow_runner: bool = False  # trail past TP2 on high-confidence structure
+    trail_atr: float = 0.0
 
 
 def _pct(a: float, b: float) -> float:
@@ -226,29 +233,106 @@ def evaluate_pair(
         # too dead — skip early
         return None
 
-    # Stops & targets from ATR
+    # --- Stops & targets: ATR floor + real structure (swing low / resistance) ---
     if atr_v <= 0 or price <= 0:
         return None
 
-    sl_dist = atr_v * config.SL_ATR_MULT
-    sl_pct = sl_dist / price * 100.0
-    sl_pct = max(config.MIN_SL_PCT, min(config.MAX_SL_PCT, sl_pct))
-    if sl_pct >= config.MAX_SL_PCT and (atr_v * config.SL_ATR_MULT / price * 100) > config.MAX_SL_PCT:
-        # genuinely too wide — skip
-        return None
+    atr_sl_dist = atr_v * config.SL_ATR_MULT
+    atr_stop = price - atr_sl_dist
+    structure_notes: list[str] = []
 
-    stop = price * (1 - sl_pct / 100.0)
+    if getattr(config, "USE_STRUCTURE_TARGETS", True):
+        swing_lo = recent_swing_low(d, lookback=getattr(config, "SWING_LOOKBACK", 24))
+        # SL just under swing low (support), but not wider than max SL
+        if swing_lo is not None and swing_lo < price:
+            struct_stop = swing_lo - atr_v * 0.15
+            # Prefer structural support if it's not absurdly far
+            if struct_stop < price:
+                # use the tighter of ATR stop and structure? No — structure support
+                # is better: place stop under support (may be slightly wider than ATR)
+                stop_candidate = min(atr_stop, struct_stop)
+                structure_notes.append(
+                    f"SL under swing support {swing_lo:.6g} (ATR stop was {atr_stop:.6g})"
+                )
+            else:
+                stop_candidate = atr_stop
+        else:
+            stop_candidate = atr_stop
+    else:
+        stop_candidate = atr_stop
+
+    sl_pct = (price - stop_candidate) / price * 100.0
+    sl_pct = max(config.MIN_SL_PCT, min(config.MAX_SL_PCT, sl_pct))
+    if (price - stop_candidate) / price * 100.0 > config.MAX_SL_PCT + 0.05:
+        # structure too wide — fall back to ATR clamp
+        stop_candidate = price * (1 - config.MAX_SL_PCT / 100.0)
+        sl_pct = config.MAX_SL_PCT
+        structure_notes.append("structure SL capped by MAX_SL_PCT")
+
+    stop = price * (1 - sl_pct / 100.0) if stop_candidate >= price else stop_candidate
+    # re-clamp stop to sl_pct bounds
+    stop = min(stop, price * (1 - config.MIN_SL_PCT / 100.0))
+    stop = max(stop, price * (1 - config.MAX_SL_PCT / 100.0))
+    sl_pct = (price - stop) / price * 100.0
     risk = price - stop
     if risk <= 0:
         return None
 
-    tp1 = price + risk * config.TP1_R
-    tp2 = price + risk * config.TP2_R
-    tp3 = price + risk * config.TP3_R
+    # R-based floors
+    tp1_r = price + risk * config.TP1_R
+    tp2_r = price + risk * config.TP2_R
+    tp3_r = price + risk * config.TP3_R
 
-    rr1 = config.TP1_R
-    rr2 = config.TP2_R
-    rr3 = config.TP3_R
+    bb_mid = float(last["bb_mid"]) if pd.notna(last["bb_mid"]) else price
+    bb_upper = float(last["bb_upper"]) if pd.notna(last["bb_upper"]) else tp3_r
+
+    # Structure targets: nearest resistance / BB mid / prior swing highs
+    if getattr(config, "USE_STRUCTURE_TARGETS", True):
+        resists = resistance_levels(
+            d, price, lookback=getattr(config, "RESISTANCE_LOOKBACK", 48)
+        )
+        # TP1: bank at BB mid mean-reversion or first resistance, at least 1R
+        tp1_candidates = [tp1_r]
+        if bb_mid > price + risk * 0.8:
+            tp1_candidates.append(bb_mid)
+        if resists:
+            # first resistance if not too close/far
+            r0 = resists[0]
+            if r0 >= price + risk * 0.9:
+                tp1_candidates.append(r0)
+        # Take earliest reasonable bank (min above 0.9R)
+        tp1 = min(x for x in tp1_candidates if x >= price + risk * 0.9)
+        structure_notes.append(f"TP1 structure/mean-rev @ {tp1:.6g}")
+
+        # TP2: next resistance or 2.2R floor — allow structure to push higher
+        tp2 = tp2_r
+        if resists:
+            for r in resists:
+                if r >= price + risk * config.MIN_RR_TO_TP2:
+                    # extend toward structure if better than pure R
+                    tp2 = max(tp2_r, min(r, price + risk * config.TP3_R * 1.15))
+                    structure_notes.append(f"TP2 toward resistance {r:.6g}")
+                    break
+        if bb_upper > tp2:
+            # allow stretch to BB upper as runner zone
+            tp3 = max(tp3_r, bb_upper)
+        else:
+            tp3 = max(tp3_r, tp2 + risk * 0.8)
+        if len(resists) >= 2 and resists[1] > tp2:
+            tp3 = max(tp3, resists[1])
+            structure_notes.append(f"TP3/runner resistance {tp3:.6g}")
+    else:
+        tp1, tp2, tp3 = tp1_r, tp2_r, tp3_r
+
+    # Ensure order TP1 < TP2 < TP3
+    if tp2 <= tp1:
+        tp2 = tp1 + risk * 0.5
+    if tp3 <= tp2:
+        tp3 = tp2 + risk * 0.5
+
+    rr1 = (tp1 - price) / risk
+    rr2 = (tp2 - price) / risk
+    rr3 = (tp3 - price) / risk
 
     if rr2 < config.MIN_RR_TO_TP2:
         return None
@@ -265,33 +349,40 @@ def evaluate_pair(
         sl_pct=sl_pct,
     )
 
+    # Bonus for clean structure room to run
+    if rr2 >= 2.8:
+        conf = min(100.0, conf + 4)
+        score_bits.append(f"room to run (RR→TP2 {rr2:.2f})")
+
     if conf < config.MIN_CONFIDENCE:
         log.debug("%s conf %.0f < min %d", symbol, conf, config.MIN_CONFIDENCE)
         return None
 
     lev_adv: LeverageAdvice = recommend_leverage(atr_p, sl_pct, conf, rr2)
+    allow_runner = conf >= getattr(config, "RUNNER_IF_CONF_GE", 78)
+    trail_atr = atr_v * getattr(config, "TRAIL_ATR_MULT", 1.6)
 
     # Entry zone: current close ± small band (limit-friendly)
     zone_pad = max(price * 0.0015, atr_v * 0.15)
     entry_low = price - zone_pad
     entry_high = price + zone_pad * 0.35  # prefer not chasing up
 
-    reasons = list(trend_reasons) + score_bits
+    reasons = list(trend_reasons) + score_bits + structure_notes
     notes = [
         f"Signal TF: {config.SIGNAL_TIMEFRAME} | Trend TF: {config.TREND_TIMEFRAME}",
         f"ATR(14)={atr_v:.6g} ({atr_p:.2f}% of price)",
-        f"Suggested partials: TP1 {config.TP1_SIZE_PCT}% / TP2 {config.TP2_SIZE_PCT}% / TP3 {config.TP3_SIZE_PCT}%",
-        "Isolated margin. Never move SL further away.",
-        (
-            "AUTO-TRADE will place this on MEXC if enabled."
-            if config.AUTO_TRADE
-            else "Signal mode: enter manually on MEXC if not auto-trading."
-        ),
+        f"Partials: TP1 {config.TP1_SIZE_PCT}% / TP2 {config.TP2_SIZE_PCT}% / runner {config.TP3_SIZE_PCT}%",
+        "Targets blend R-multiples + swing resistance / BB mid (structure).",
+        "Isolated margin (USDC). After TP1, runner trails under peak.",
     ]
-    if symbol != config.BTC_SYMBOL and btc_rsi is not None:
+    if allow_runner:
+        notes.append(
+            f"High conf ({conf:.0f}) — after TP1, trail past TP2 (let winners run)."
+        )
+    if btc_rsi is not None and not symbol.startswith("BTC/"):
         notes.append(f"BTC 15m RSI={btc_rsi:.1f} (filter passed)")
     if atr_p > 2.0:
-        notes.append("⚠ Elevated volatility — size/leverage already reduced; watch funding.")
+        notes.append("⚠ Elevated volatility — leverage reduced; watch funding.")
     if conf >= 80:
         notes.append("High-conviction setup within this model.")
 
@@ -322,4 +413,6 @@ def evaluate_pair(
         volume_ratio=vol_ratio,
         reasons=reasons,
         notes=notes,
+        allow_runner=allow_runner,
+        trail_atr=trail_atr,
     )

@@ -153,6 +153,9 @@ class MexcExecutor:
                 tp2_order_id=tp_id,
                 tp1_done=False,
                 auto_trade=True,
+                trail_peak=fill,
+                trail_atr=float(getattr(sig, "trail_atr", 0) or 0),
+                allow_runner=bool(getattr(sig, "allow_runner", False)),
             )
             return {
                 "ok": True,
@@ -188,6 +191,38 @@ class MexcExecutor:
             return None
 
         buf = abs(trade.entry) * 0.0003
+
+        # --- Trail runner after TP1 (raise stop under peak) ---
+        if (
+            trade.tp1_done
+            and getattr(config, "TRAIL_AFTER_TP1", True)
+            and trade.direction == "LONG"
+        ):
+            peak = max(float(getattr(trade, "trail_peak", 0) or 0), px, trade.entry)
+            trade.trail_peak = peak
+            trail_dist = float(getattr(trade, "trail_atr", 0) or 0)
+            if trail_dist <= 0:
+                trail_dist = abs(trade.entry) * 0.012  # ~1.2% fallback
+            new_stop = peak - trail_dist
+            # Never trail below breakeven after TP1
+            new_stop = max(new_stop, trade.entry)
+            if trade.stop <= 0 or new_stop > trade.stop + buf:
+                old = trade.stop
+                trade.stop = new_stop
+                log.info(
+                    "Trail SL %s: %.6g → %.6g (peak=%.6g atr_trail=%.6g)",
+                    trade.symbol,
+                    old,
+                    new_stop,
+                    peak,
+                    trail_dist,
+                )
+                # Best-effort update exchange SL for runner
+                try:
+                    self._place_protective(trade.symbol, rem, trade.stop, trade.tp2)
+                except Exception as e:
+                    log.debug("trail protective: %s", e)
+
         if trade.direction == "LONG" and trade.stop > 0 and px <= trade.stop - buf:
             if self.close_all_remaining(trade):
                 return "stop_hit"
@@ -245,11 +280,14 @@ class MexcExecutor:
                     trade.tp1_done = True
                     trade.contracts_remaining = rem2
                     trade.contracts = rem2
-                    if trade.stop <= 0 or trade.stop >= trade.entry:
-                        trade.stop = trade.entry
+                    # Breakeven + start trail peak
+                    trade.stop = max(trade.stop, trade.entry) if trade.stop > 0 else trade.entry
+                    trade.trail_peak = max(px, trade.entry)
                     try:
+                        # High-conf runners: trail only (soft TP2), no hard TP2 on exchange
+                        tp_arm = trade.tp3 if trade.allow_runner else trade.tp2
                         sl_id, tp_id = self._place_protective(
-                            trade.symbol, rem2, trade.stop, trade.tp2
+                            trade.symbol, rem2, trade.stop, tp_arm
                         )
                         trade.sl_order_id = sl_id
                         trade.tp2_order_id = tp_id
@@ -270,10 +308,48 @@ class MexcExecutor:
                 trade.tp1_done = True  # avoid retry spam; full size runs to TP2
                 return "tp1_skip_hold"
 
+        # TP2: full exit for normal setups; high-conf runners take another
+        # partial at TP2 and keep trailing to TP3 / trail stop
         if trade.tp2 > 0 and px >= trade.tp2 + buf:
+            if trade.allow_runner and trade.tp1_done:
+                # Scale out more at TP2, leave runner for trail / TP3
+                mn = float(
+                    (self.ex.market(trade.symbol).get("limits") or {})
+                    .get("amount", {})
+                    .get("min")
+                    or 1
+                )
+                if rem >= 2 * mn:
+                    q2 = max(mn, rem * 0.5)
+                    try:
+                        q2 = float(self.ex.amount_to_precision(trade.symbol, q2))
+                    except Exception:
+                        q2 = math.floor(rem * 0.5) or mn
+                    if rem - q2 >= mn and self.market_close(trade, q2):
+                        time.sleep(0.5)
+                        still3, rem3 = self._position_remaining(trade.symbol)
+                        if not still3 or rem3 <= 0:
+                            return "tp2_hit"
+                        trade.contracts_remaining = rem3
+                        trade.trail_peak = max(trade.trail_peak, px)
+                        log.info("TP2 scale-out runner rem=%s", rem3)
+                        return "tp2_partial"
+                # else fall through to full close if can't leave runner
             if self.close_all_remaining(trade):
                 return "tp2_hit"
             return None
+
+        # Soft TP3 for runners (optional full exit)
+        if (
+            trade.allow_runner
+            and trade.tp1_done
+            and trade.tp3 > 0
+            and px >= trade.tp3 + buf
+        ):
+            if self.close_all_remaining(trade):
+                return "tp3_hit"
+            return None
+
         return None
 
     def close_all_remaining(self, trade: OpenSignal) -> bool:
