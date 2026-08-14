@@ -233,44 +233,76 @@ def evaluate_pair(
         # too dead — skip early
         return None
 
-    # --- Stops & targets: ATR floor + real structure (swing low / resistance) ---
+    # --- Stops & targets: real support invalidation + structure targets ---
     if atr_v <= 0 or price <= 0:
         return None
 
     atr_sl_dist = atr_v * config.SL_ATR_MULT
     atr_stop = price - atr_sl_dist
     structure_notes: list[str] = []
+    stop_candidate = atr_stop
 
-    if getattr(config, "USE_STRUCTURE_TARGETS", True):
+    if getattr(config, "USE_STRUCTURE_SL", True) or getattr(
+        config, "USE_STRUCTURE_TARGETS", True
+    ):
         swing_lo = recent_swing_low(d, lookback=getattr(config, "SWING_LOOKBACK", 24))
-        # SL just under swing low (support), but not wider than max SL
-        if swing_lo is not None and swing_lo < price:
-            struct_stop = swing_lo - atr_v * 0.15
-            # Prefer structural support if it's not absurdly far
-            if struct_stop < price:
-                # use the tighter of ATR stop and structure? No — structure support
-                # is better: place stop under support (may be slightly wider than ATR)
-                stop_candidate = min(atr_stop, struct_stop)
-                structure_notes.append(
-                    f"SL under swing support {swing_lo:.6g} (ATR stop was {atr_stop:.6g})"
+        # Optional 4h swing support (more meaningful invalidation)
+        htf_swing = None
+        if getattr(config, "USE_HTF_SWING_SL", True) and df_trend is not None and len(df_trend) >= 20:
+            try:
+                htf_swing = recent_swing_low(
+                    df_trend, lookback=min(30, len(df_trend) - 5), left=1, right=1
                 )
-            else:
-                stop_candidate = atr_stop
-        else:
-            stop_candidate = atr_stop
-    else:
-        stop_candidate = atr_stop
+            except Exception:
+                htf_swing = None
 
-    sl_pct = (price - stop_candidate) / price * 100.0
-    sl_pct = max(config.MIN_SL_PCT, min(config.MAX_SL_PCT, sl_pct))
-    if (price - stop_candidate) / price * 100.0 > config.MAX_SL_PCT + 0.05:
-        # structure too wide — fall back to ATR clamp
+        # Structural invalidation = break of nearest meaningful support under price
+        support_levels: list[tuple[float, str]] = []
+        if swing_lo is not None and swing_lo < price:
+            support_levels.append((swing_lo, "15m swing"))
+        if htf_swing is not None and htf_swing < price:
+            support_levels.append((htf_swing, "4h swing"))
+
+        if support_levels:
+            # Prefer support closest under price that still yields MIN_SL..MAX_SL room
+            # (nearest real support → better R:R, still structure-based)
+            support_levels.sort(key=lambda x: x[0], reverse=True)  # highest first
+            chosen = None
+            for lvl, label in support_levels:
+                cand = lvl - atr_v * 0.2
+                dist_pct = (price - cand) / price * 100.0
+                if config.MIN_SL_PCT * 0.85 <= dist_pct <= config.MAX_SL_PCT * 1.05:
+                    chosen = (cand, lvl, label, dist_pct)
+                    break
+            if chosen is None:
+                # fallback: deepest support then clamp later
+                lvl, label = min(support_levels, key=lambda x: x[0])
+                cand = lvl - atr_v * 0.2
+                dist_pct = (price - cand) / price * 100.0
+                chosen = (cand, lvl, label, dist_pct)
+
+            struct_stop, lvl, label, dist_pct = chosen
+            # Blend: structural support is primary invalidation
+            stop_candidate = struct_stop
+            structure_notes.append(
+                f"SL under {label} support {lvl:.6g} "
+                f"(ATR stop was {atr_stop:.6g}, risk≈{dist_pct:.2f}%)"
+            )
+            # If structure is absurdly tight vs ATR, pad toward ATR floor slightly
+            # so noise under wick doesn't stop out instantly
+            if struct_stop > atr_stop and (price - struct_stop) < atr_sl_dist * 0.55:
+                stop_candidate = price - atr_sl_dist * 0.7
+                structure_notes.append("SL padded (structure too tight vs ATR)")
+
+    sl_raw_pct = (price - stop_candidate) / price * 100.0
+    if sl_raw_pct > config.MAX_SL_PCT + 0.05:
         stop_candidate = price * (1 - config.MAX_SL_PCT / 100.0)
-        sl_pct = config.MAX_SL_PCT
         structure_notes.append("structure SL capped by MAX_SL_PCT")
+    elif sl_raw_pct < config.MIN_SL_PCT:
+        stop_candidate = price * (1 - config.MIN_SL_PCT / 100.0)
+        structure_notes.append("SL floored to MIN_SL_PCT")
 
-    stop = price * (1 - sl_pct / 100.0) if stop_candidate >= price else stop_candidate
-    # re-clamp stop to sl_pct bounds
+    stop = stop_candidate if stop_candidate < price else atr_stop
     stop = min(stop, price * (1 - config.MIN_SL_PCT / 100.0))
     stop = max(stop, price * (1 - config.MAX_SL_PCT / 100.0))
     sl_pct = (price - stop) / price * 100.0
@@ -285,41 +317,44 @@ def evaluate_pair(
 
     bb_mid = float(last["bb_mid"]) if pd.notna(last["bb_mid"]) else price
     bb_upper = float(last["bb_upper"]) if pd.notna(last["bb_upper"]) else tp3_r
+    resists: list[float] = []
 
     # Structure targets: nearest resistance / BB mid / prior swing highs
     if getattr(config, "USE_STRUCTURE_TARGETS", True):
         resists = resistance_levels(
             d, price, lookback=getattr(config, "RESISTANCE_LOOKBACK", 48)
         )
-        # TP1: bank at BB mid mean-reversion or first resistance, at least 1R
+        # TP1: bank at BB mid mean-reversion or first resistance, at least ~1R
+        # Prefer earliest bank so free-ride on structure for the runner
         tp1_candidates = [tp1_r]
-        if bb_mid > price + risk * 0.8:
+        if bb_mid > price + risk * 0.85:
             tp1_candidates.append(bb_mid)
         if resists:
-            # first resistance if not too close/far
             r0 = resists[0]
             if r0 >= price + risk * 0.9:
                 tp1_candidates.append(r0)
-        # Take earliest reasonable bank (min above 0.9R)
-        tp1 = min(x for x in tp1_candidates if x >= price + risk * 0.9)
+        tp1 = min(x for x in tp1_candidates if x >= price + risk * 0.85)
         structure_notes.append(f"TP1 structure/mean-rev @ {tp1:.6g}")
 
-        # TP2: next resistance or 2.2R floor — allow structure to push higher
+        # TP2: next clear resistance or R floor — structure can push targets higher
         tp2 = tp2_r
         if resists:
             for r in resists:
                 if r >= price + risk * config.MIN_RR_TO_TP2:
-                    # extend toward structure if better than pure R
-                    tp2 = max(tp2_r, min(r, price + risk * config.TP3_R * 1.15))
+                    # allow structure beyond pure R (up to ~4R zone)
+                    tp2 = max(tp2_r, min(r, price + risk * max(config.TP3_R, 4.0)))
                     structure_notes.append(f"TP2 toward resistance {r:.6g}")
                     break
+        # TP3 / runner: BB upper, 2nd resistance, or extended R
+        tp3 = max(tp3_r, tp2 + risk * 0.9)
         if bb_upper > tp2:
-            # allow stretch to BB upper as runner zone
-            tp3 = max(tp3_r, bb_upper)
-        else:
-            tp3 = max(tp3_r, tp2 + risk * 0.8)
-        if len(resists) >= 2 and resists[1] > tp2:
-            tp3 = max(tp3, resists[1])
+            tp3 = max(tp3, bb_upper)
+        far_resists = [r for r in resists if r > tp2 * 1.001]
+        if far_resists:
+            # aim runner at next major resistance beyond TP2
+            tp3 = max(tp3, far_resists[0])
+            if len(far_resists) >= 2:
+                tp3 = max(tp3, far_resists[1])
             structure_notes.append(f"TP3/runner resistance {tp3:.6g}")
     else:
         tp1, tp2, tp3 = tp1_r, tp2_r, tp3_r
@@ -353,14 +388,25 @@ def evaluate_pair(
     if rr2 >= 2.8:
         conf = min(100.0, conf + 4)
         score_bits.append(f"room to run (RR→TP2 {rr2:.2f})")
+    if rr3 >= 3.5:
+        conf = min(100.0, conf + 3)
+        score_bits.append(f"extended runner room (RR→TP3 {rr3:.2f})")
+    if len(resists) >= getattr(config, "RUNNER_IF_RESIST_COUNT", 2):
+        conf = min(100.0, conf + 2)
+        score_bits.append(f"{len(resists)} resistance steps above")
 
     if conf < config.MIN_CONFIDENCE:
         log.debug("%s conf %.0f < min %d", symbol, conf, config.MIN_CONFIDENCE)
         return None
 
     lev_adv: LeverageAdvice = recommend_leverage(atr_p, sl_pct, conf, rr2)
-    allow_runner = conf >= getattr(config, "RUNNER_IF_CONF_GE", 78)
-    trail_atr = atr_v * getattr(config, "TRAIL_ATR_MULT", 1.6)
+
+    # Runner when high conf OR clear structure ladder / RR room above TP2
+    conf_gate = conf >= getattr(config, "RUNNER_IF_CONF_GE", 72)
+    room_gate = rr3 >= getattr(config, "RUNNER_IF_RR3_GE", 3.2)
+    resist_gate = len(resists) >= getattr(config, "RUNNER_IF_RESIST_COUNT", 2)
+    allow_runner = conf_gate or (conf >= config.MIN_CONFIDENCE and (room_gate or resist_gate))
+    trail_atr = atr_v * getattr(config, "TRAIL_ATR_MULT", 1.75)
 
     # Entry zone: current close ± small band (limit-friendly)
     zone_pad = max(price * 0.0015, atr_v * 0.15)
@@ -372,12 +418,19 @@ def evaluate_pair(
         f"Signal TF: {config.SIGNAL_TIMEFRAME} | Trend TF: {config.TREND_TIMEFRAME}",
         f"ATR(14)={atr_v:.6g} ({atr_p:.2f}% of price)",
         f"Partials: TP1 {config.TP1_SIZE_PCT}% / TP2 {config.TP2_SIZE_PCT}% / runner {config.TP3_SIZE_PCT}%",
-        "Targets blend R-multiples + swing resistance / BB mid (structure).",
-        "Isolated margin (USDC). After TP1, runner trails under peak.",
+        "SL under real swing support; targets = structure + R floors.",
+        "After TP1: trail under higher-lows (structure) so winners can run.",
     ]
     if allow_runner:
+        why = []
+        if conf_gate:
+            why.append(f"conf {conf:.0f}")
+        if room_gate:
+            why.append(f"RR→TP3 {rr3:.2f}")
+        if resist_gate:
+            why.append(f"{len(resists)} resists")
         notes.append(
-            f"High conf ({conf:.0f}) — after TP1, trail past TP2 (let winners run)."
+            "Runner ON (" + ", ".join(why) + ") — scale at TP2, trail past on structure."
         )
     if btc_rsi is not None and not symbol.startswith("BTC/"):
         notes.append(f"BTC 15m RSI={btc_rsi:.1f} (filter passed)")

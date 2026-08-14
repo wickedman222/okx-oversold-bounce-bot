@@ -161,9 +161,9 @@ MAX_SL_PCT = 3.5
 TP1_R = 1.2
 TP2_R = 2.2
 TP3_R = 3.5
-TP1_SIZE_PCT = 35  # bank a bit less so more can run
+TP1_SIZE_PCT = 30  # bank less so more size can run on structure
 TP2_SIZE_PCT = 35
-TP3_SIZE_PCT = 30  # runner remainder
+TP3_SIZE_PCT = 35  # runner remainder
 MIN_RR_TO_TP2 = 1.8
 MIN_CONFIDENCE = _env_float("MIN_CONFIDENCE", "68")
 
@@ -171,14 +171,26 @@ MIN_CONFIDENCE = _env_float("MIN_CONFIDENCE", "68")
 USE_STRUCTURE_TARGETS = True
 SWING_LOOKBACK = 24
 RESISTANCE_LOOKBACK = 48
-# After TP1: trail runner under peak - ATR*mult (lets winners run)
+# Prefer real swing-support invalidation for SL (not always wider of ATR/struct)
+USE_STRUCTURE_SL = True
+# Also consider 4h swing low as structural support when tighter/valid
+USE_HTF_SWING_SL = True
+
+# After TP1: trail under higher-lows (structure) + ATR giveback cap
 TRAIL_AFTER_TP1 = True
-TRAIL_ATR_MULT = 1.6
-# High-confidence setups: trail past TP2 instead of full exit at TP2
-RUNNER_IF_CONF_GE = 78
+STRUCTURE_TRAIL = True
+TRAIL_ATR_MULT = 1.75  # slightly looser ATR trail — noise won't clip winners
+TRAIL_SWING_BUFFER_ATR = 0.25  # stop just under last swing low
+TRAIL_MAX_GIVEBACK_ATR = 2.4  # never let structure leave more than this under peak
+# Runners: high conf OR clear structure room above (let winners past TP2)
+RUNNER_IF_CONF_GE = 72
+RUNNER_IF_RR3_GE = 3.2
+RUNNER_IF_RESIST_COUNT = 2
 
 PAIR_COOLDOWN_HOURS = _env_float("PAIR_COOLDOWN_HOURS", "8")
-TRADE_LOCK_MAX_HOURS = _env_float("TRADE_LOCK_MAX_HOURS", "12")
+# Signal-only lock; live auto trades stay open until exchange flat / SL / TP
+TRADE_LOCK_MAX_HOURS = _env_float("TRADE_LOCK_MAX_HOURS", "18")
+TRADE_LOCK_RUNNER_HOURS = _env_float("TRADE_LOCK_RUNNER_HOURS", "36")
 AUTO_RELEASE_ON_SL_TP = True
 
 # =============================================================================

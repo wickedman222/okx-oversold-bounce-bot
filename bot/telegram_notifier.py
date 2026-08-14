@@ -100,6 +100,7 @@ def format_signal(sig: Signal) -> str:
 • TP3: <code>{_fmt_price(sig.tp3)}</code>  (+{sig.tp3_pct:.2f}%)  R:R {sig.rr_tp3:.2f}  — runner {config.TP3_SIZE_PCT}%
 
 📐 <b>Risk : Reward</b> → TP2 = <b>1 : {sig.rr_tp2:.2f}</b>
+🏔 After TP1: trail under <b>higher-lows</b>{'  ·  <b>RUNNER</b> past TP2' if getattr(sig, 'allow_runner', False) else ''}
 
 💰 <b>Trade size:</b> exactly <b>${sig.position_size_usd:.0f} USDC</b> margin per trade (not % of account). Max 1 trade open.
 

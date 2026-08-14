@@ -18,9 +18,12 @@ import traceback
 from typing import Any, Optional
 
 import ccxt
+import pandas as pd
 
 import config
 from bot.exchange import make_exchange
+from bot.indicators import atr as atr_series
+from bot.indicators import structure_trail_stop
 from bot.scanner import Signal
 from bot.trade_state import OpenSignal
 
@@ -82,11 +85,17 @@ class MexcExecutor:
             self._ensure_net_mode()
             self._set_leverage(sig.symbol, lev)
             qty = self._size_contracts(sig.symbol, sig.entry, lev)
+            # Runners: don't hard-arm exchange TP2 (would kill the trail). Soft TP3 only.
+            hard_tp = (
+                sig.tp3
+                if bool(getattr(sig, "allow_runner", False)) and sig.tp3 > 0
+                else sig.tp2
+            )
             try:
                 sl_px = float(self.ex.price_to_precision(sig.symbol, sig.stop))
-                tp_px = float(self.ex.price_to_precision(sig.symbol, sig.tp2))
+                tp_px = float(self.ex.price_to_precision(sig.symbol, hard_tp))
             except Exception:
-                sl_px, tp_px = float(sig.stop), float(sig.tp2)
+                sl_px, tp_px = float(sig.stop), float(hard_tp)
 
             params: dict[str, Any] = {
                 "tdMode": "isolated",
@@ -103,7 +112,7 @@ class MexcExecutor:
             }
 
             log.info(
-                "OPEN LONG %s qty=%s lev=%dx (cap %dx) margin=$%.0f SL=%s TP2=%s",
+                "OPEN LONG %s qty=%s lev=%dx (cap %dx) margin=$%.0f SL=%s TP=%s%s",
                 sig.symbol,
                 qty,
                 lev,
@@ -111,6 +120,7 @@ class MexcExecutor:
                 config.POSITION_SIZE_USD,
                 sl_px,
                 tp_px,
+                " (runner soft-TP3)" if getattr(sig, "allow_runner", False) else "",
             )
             order = self.ex.create_order(sig.symbol, "market", "buy", qty, None, params)
             fill = float(order.get("average") or order.get("price") or sig.entry)
@@ -192,7 +202,7 @@ class MexcExecutor:
 
         buf = abs(trade.entry) * 0.0003
 
-        # --- Trail runner after TP1 (raise stop under peak) ---
+        # --- Trail after TP1: structure (higher-lows) + ATR giveback cap ---
         if (
             trade.tp1_done
             and getattr(config, "TRAIL_AFTER_TP1", True)
@@ -203,23 +213,67 @@ class MexcExecutor:
             trail_dist = float(getattr(trade, "trail_atr", 0) or 0)
             if trail_dist <= 0:
                 trail_dist = abs(trade.entry) * 0.012  # ~1.2% fallback
+
             new_stop = peak - trail_dist
+            trail_why = "ATR trail"
+            # Real support trail when we can fetch recent candles
+            if getattr(config, "STRUCTURE_TRAIL", True):
+                try:
+                    ohlcv = self.ex.fetch_ohlcv(
+                        trade.symbol,
+                        timeframe=getattr(config, "SIGNAL_TIMEFRAME", "15m") or "15m",
+                        limit=60,
+                    )
+                    if ohlcv and len(ohlcv) >= 15:
+                        df = pd.DataFrame(
+                            ohlcv,
+                            columns=["ts", "open", "high", "low", "close", "volume"],
+                        )
+                        # Drop forming bar
+                        if len(df) > 1:
+                            df = df.iloc[:-1]
+                        atr_col = atr_series(df, getattr(config, "ATR_PERIOD", 14))
+                        atr_live = float(atr_col.iloc[-1]) if len(atr_col) and pd.notna(atr_col.iloc[-1]) else trail_dist / max(
+                            getattr(config, "TRAIL_ATR_MULT", 1.75), 0.5
+                        )
+                        struct_stop, trail_why = structure_trail_stop(
+                            df,
+                            price=px,
+                            peak=peak,
+                            entry=trade.entry,
+                            atr_v=atr_live,
+                            swing_buffer_atr=getattr(config, "TRAIL_SWING_BUFFER_ATR", 0.25),
+                            max_giveback_atr=getattr(config, "TRAIL_MAX_GIVEBACK_ATR", 2.4),
+                            atr_trail_mult=getattr(config, "TRAIL_ATR_MULT", 1.75),
+                        )
+                        new_stop = struct_stop
+                        # Keep trail_atr fresh for restarts / fallbacks
+                        trade.trail_atr = atr_live * getattr(config, "TRAIL_ATR_MULT", 1.75)
+                except Exception as e:
+                    log.debug("structure trail OHLCV: %s", e)
+                    trail_why = "ATR trail (ohlcv fail)"
+
             # Never trail below breakeven after TP1
             new_stop = max(new_stop, trade.entry)
             if trade.stop <= 0 or new_stop > trade.stop + buf:
                 old = trade.stop
                 trade.stop = new_stop
                 log.info(
-                    "Trail SL %s: %.6g → %.6g (peak=%.6g atr_trail=%.6g)",
+                    "Trail SL %s: %.6g → %.6g (peak=%.6g | %s)",
                     trade.symbol,
                     old,
                     new_stop,
                     peak,
-                    trail_dist,
+                    trail_why,
                 )
-                # Best-effort update exchange SL for runner
+                # Best-effort update exchange SL; soft TP stays TP3 for runners
                 try:
-                    self._place_protective(trade.symbol, rem, trade.stop, trade.tp2)
+                    tp_arm = (
+                        trade.tp3
+                        if trade.allow_runner and trade.tp3 > 0
+                        else trade.tp2
+                    )
+                    self._place_protective(trade.symbol, rem, trade.stop, tp_arm)
                 except Exception as e:
                     log.debug("trail protective: %s", e)
 
@@ -284,8 +338,12 @@ class MexcExecutor:
                     trade.stop = max(trade.stop, trade.entry) if trade.stop > 0 else trade.entry
                     trade.trail_peak = max(px, trade.entry)
                     try:
-                        # High-conf runners: trail only (soft TP2), no hard TP2 on exchange
-                        tp_arm = trade.tp3 if trade.allow_runner else trade.tp2
+                        # Runners: soft TP3 so exchange won't full-exit at TP2
+                        tp_arm = (
+                            trade.tp3
+                            if trade.allow_runner and trade.tp3 > 0
+                            else trade.tp2
+                        )
                         sl_id, tp_id = self._place_protective(
                             trade.symbol, rem2, trade.stop, tp_arm
                         )

@@ -77,6 +77,8 @@ def manage_open_trade(
     symbol = trade.symbol
     prev_rem = trade.contracts_remaining
     prev_tp1 = trade.tp1_done
+    prev_stop = float(trade.stop or 0)
+    prev_peak = float(getattr(trade, "trail_peak", 0) or 0)
 
     log.info(
         "In-trade check: %s age=%.1fh entry=%.6g rem=%s auto=%s",
@@ -134,8 +136,13 @@ def manage_open_trade(
             state.clear_active(reason)
             send_trade_closed(symbol, reason, px)
             return
-        # Only write disk if size/flags changed (saves Railway FS churn)
-        if trade.contracts_remaining != prev_rem or trade.tp1_done != prev_tp1:
+        # Persist size/flags and trail ratchet so restarts keep structure trail
+        if (
+            trade.contracts_remaining != prev_rem
+            or trade.tp1_done != prev_tp1
+            or float(trade.stop or 0) != prev_stop
+            or float(getattr(trade, "trail_peak", 0) or 0) != prev_peak
+        ):
             state.save()
         return
 

@@ -82,23 +82,93 @@ def enrich(df: pd.DataFrame, cfg) -> pd.DataFrame:
 
 def recent_swing_low(df: pd.DataFrame, lookback: int = 20, left: int = 2, right: int = 2) -> Optional[float]:
     """Lowest confirmed swing low in the last `lookback` bars (excluding forming)."""
+    swings = recent_swing_lows(df, lookback=lookback, left=left, right=right)
+    if not swings:
+        if len(df) == 0:
+            return None
+        return float(df["low"].iloc[-min(10, len(df)) :].min())
+    return min(swings)
+
+
+def recent_swing_lows(
+    df: pd.DataFrame, lookback: int = 40, left: int = 2, right: int = 2
+) -> list[float]:
+    """Confirmed swing lows (local unique mins), oldest → newest."""
+    if df is None or len(df) < left + right + 3:
+        return []
     if len(df) < lookback + left + right + 1:
         lookback = max(5, len(df) - left - right - 1)
     if lookback < 5:
-        return float(df["low"].iloc[-min(10, len(df)) :].min())
+        return [float(df["low"].iloc[-min(10, len(df)) :].min())]
 
-    window = df.iloc[-(lookback + right) : -right if right else None].copy()
+    window = df.iloc[-(lookback + right) : -right if right else None]
     lows = window["low"].values
-    best = None
+    swings: list[float] = []
     for i in range(left, len(lows) - right):
         seg = lows[i - left : i + right + 1]
         if lows[i] == seg.min() and list(seg).count(lows[i]) == 1:
-            # local unique min
-            if best is None or lows[i] < best:
-                best = float(lows[i])
-    if best is None:
-        best = float(window["low"].min())
-    return best
+            swings.append(float(lows[i]))
+    if not swings:
+        swings.append(float(window["low"].min()))
+    return swings
+
+
+def last_higher_low(
+    df: pd.DataFrame,
+    price: float,
+    lookback: int = 40,
+    left: int = 2,
+    right: int = 2,
+) -> Optional[float]:
+    """
+    Most recent confirmed swing low that is still structural support
+    (below last price). Prefer the latest HL so trail ratchets up.
+    """
+    swings = recent_swing_lows(df, lookback=lookback, left=left, right=right)
+    if not swings:
+        return None
+    # newest first among lows that sit under price
+    under = [s for s in reversed(swings) if s < price * 0.9995]
+    if not under:
+        return None
+    return under[0]
+
+
+def structure_trail_stop(
+    df: pd.DataFrame,
+    price: float,
+    peak: float,
+    entry: float,
+    atr_v: float,
+    swing_buffer_atr: float = 0.25,
+    max_giveback_atr: float = 2.4,
+    atr_trail_mult: float = 1.75,
+) -> tuple[float, str]:
+    """
+    Trail long under real support (last higher-low), with ATR fallback.
+
+    Philosophy: let winners run while higher-lows hold; only force a tighter
+    stop if structure would give back more than max_giveback_atr under peak.
+
+    Returns (stop_price, reason). Caller enforces BE (never below entry).
+    """
+    atr_v = max(float(atr_v or 0), abs(price) * 0.002)
+    peak = max(float(peak), float(price), float(entry))
+    atr_stop = peak - atr_v * atr_trail_mult
+    max_giveback_stop = peak - atr_v * max_giveback_atr
+
+    hl = last_higher_low(df, price)
+    if hl is not None and hl < price:
+        struct = hl - atr_v * swing_buffer_atr
+        # Prefer structure (often looser → longer run); floor at max giveback
+        stop = max(struct, max_giveback_stop)
+        if struct >= max_giveback_stop:
+            reason = f"HL support {hl:.6g}"
+        else:
+            reason = f"HL {hl:.6g} capped (max giveback {max_giveback_atr:.1f} ATR)"
+        return stop, reason
+
+    return atr_stop, "ATR trail (no HL)"
 
 
 def resistance_levels(

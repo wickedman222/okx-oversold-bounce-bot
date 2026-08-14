@@ -96,10 +96,29 @@ class TradeState:
     def is_locked(self) -> bool:
         if self.active is None:
             return False
-        if self.active.age_hours() >= config.TRADE_LOCK_MAX_HOURS:
+        age = self.active.age_hours()
+        # Live auto trades must stay managed until exchange is flat — never
+        # force-clear a real position because of lock timer (would orphan risk).
+        if self.active.auto_trade:
+            max_h = float(
+                getattr(config, "TRADE_LOCK_RUNNER_HOURS", 36)
+                if getattr(self.active, "allow_runner", False)
+                else getattr(config, "TRADE_LOCK_MAX_HOURS", 18)
+            )
+            if age >= max_h:
+                log.warning(
+                    "Trade age %.1fh >= %.0fh on %s (auto) — keep monitoring until flat",
+                    age,
+                    max_h,
+                    self.active.symbol,
+                )
+            return True
+
+        max_h = float(getattr(config, "TRADE_LOCK_MAX_HOURS", 18))
+        if age >= max_h:
             log.info(
                 "Trade lock expired (%.1fh) on %s — releasing",
-                self.active.age_hours(),
+                age,
                 self.active.symbol,
             )
             self.clear_active("lock_expired")
