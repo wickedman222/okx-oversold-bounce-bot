@@ -85,42 +85,31 @@ class MexcExecutor:
             self._ensure_net_mode()
             self._set_leverage(sig.symbol, lev)
             qty = self._size_contracts(sig.symbol, sig.entry, lev)
-            # Runners: don't hard-arm exchange TP2 (would kill the trail). Soft TP3 only.
-            hard_tp = (
-                sig.tp3
-                if bool(getattr(sig, "allow_runner", False)) and sig.tp3 > 0
-                else sig.tp2
-            )
             try:
                 sl_px = float(self.ex.price_to_precision(sig.symbol, sig.stop))
-                tp_px = float(self.ex.price_to_precision(sig.symbol, hard_tp))
             except Exception:
-                sl_px, tp_px = float(sig.stop), float(hard_tp)
+                sl_px = float(sig.stop)
 
+            # Entry: SL only on the parent order (immediate risk cover).
+            # Full multi-TP ladder is armed after fill so sizes match live qty.
             params: dict[str, Any] = {
                 "tdMode": "isolated",
                 "marginMode": "isolated",
-                # X-Perps are instType FUTURES (ccxt market.type usually 'future')
                 "stopLoss": {
                     "triggerPrice": sl_px,
-                    "type": "market",
-                },
-                "takeProfit": {
-                    "triggerPrice": tp_px,
                     "type": "market",
                 },
             }
 
             log.info(
-                "OPEN LONG %s qty=%s lev=%dx (cap %dx) margin=$%.0f SL=%s TP=%s%s",
+                "OPEN LONG %s qty=%s lev=%dx (cap %dx) margin=$%.0f SL=%s "
+                "then arm TP1/TP2/TP3 partials",
                 sig.symbol,
                 qty,
                 lev,
                 config.LEVERAGE_MAX,
                 config.POSITION_SIZE_USD,
                 sl_px,
-                tp_px,
-                " (runner soft-TP3)" if getattr(sig, "allow_runner", False) else "",
             )
             order = self.ex.create_order(sig.symbol, "market", "buy", qty, None, params)
             fill = float(order.get("average") or order.get("price") or sig.entry)
@@ -130,12 +119,20 @@ class MexcExecutor:
             if still and live_qty > 0:
                 qty = live_qty
 
-            # Extra algo SL/TP if attach failed
-            sl_id, tp_id = self._place_protective(sig.symbol, qty, sl_px, tp_px)
-            warnings = []
-            if not sl_id:
+            # Cancel any single attached SL and place clean SL + TP1/TP2/TP3 ladder
+            arm = self._arm_full_exits(
+                sig.symbol,
+                qty,
+                sl_px=float(sig.stop),
+                tp1=float(sig.tp1),
+                tp2=float(sig.tp2),
+                tp3=float(sig.tp3),
+                tp1_done=False,
+            )
+            warnings = list(arm.get("warnings") or [])
+            if not arm.get("sl_id"):
                 warnings.append("SL_UNCONFIRMED")
-            if not tp_id:
+            if not arm.get("any_tp"):
                 warnings.append("TP_UNCONFIRMED")
 
             m = self.ex.market(sig.symbol)
@@ -159,13 +156,16 @@ class MexcExecutor:
                 margin_usd=margin,
                 notional_usd=notional,
                 entry_order_id=str(order.get("id") or ""),
-                sl_order_id=sl_id,
-                tp2_order_id=tp_id,
+                sl_order_id=str(arm.get("sl_id") or ""),
+                tp1_order_id=str(arm.get("tp1_id") or ""),
+                tp2_order_id=str(arm.get("tp2_id") or ""),
+                tp3_order_id=str(arm.get("tp3_id") or ""),
                 tp1_done=False,
                 auto_trade=True,
                 trail_peak=fill,
                 trail_atr=float(getattr(sig, "trail_atr", 0) or 0),
                 allow_runner=bool(getattr(sig, "allow_runner", False)),
+                exits_armed=bool(arm.get("sl_id") and arm.get("any_tp")),
             )
             return {
                 "ok": True,
@@ -175,6 +175,7 @@ class MexcExecutor:
                 "margin": margin,
                 "notional": notional,
                 "warnings": warnings,
+                "arm": arm,
             }
         except Exception as e:
             log.error("place_signal: %s\n%s", e, traceback.format_exc())
@@ -191,6 +192,27 @@ class MexcExecutor:
         if not still or rem <= 0:
             return "exchange_flat"
 
+        # Detect exchange-side TP1 fill (size already reduced without our flag)
+        orig = float(trade.contracts or 0)
+        if (
+            not trade.tp1_done
+            and orig > 0
+            and rem > 0
+            and rem <= orig * 0.78
+        ):
+            log.info(
+                "Exchange reduced size %s → %s — treating as TP1 done",
+                orig,
+                rem,
+            )
+            trade.tp1_done = True
+            trade.contracts = rem
+            if trade.stop > 0:
+                trade.stop = max(trade.stop, trade.entry)
+            else:
+                trade.stop = trade.entry
+            trade.exits_armed = False  # rebuild ladder for remainder
+
         trade.contracts_remaining = rem
         try:
             t = self.ex.fetch_ticker(trade.symbol)
@@ -201,6 +223,35 @@ class MexcExecutor:
             return None
 
         buf = abs(trade.entry) * 0.0003
+
+        # If SL/TPs never fully armed (restart, old code, or failed open) — fix once
+        if not getattr(trade, "exits_armed", False) and rem > 0:
+            try:
+                arm = self._arm_full_exits(
+                    trade.symbol,
+                    rem,
+                    sl_px=float(trade.stop),
+                    tp1=float(trade.tp1),
+                    tp2=float(trade.tp2),
+                    tp3=float(trade.tp3),
+                    tp1_done=bool(trade.tp1_done),
+                )
+                trade.sl_order_id = str(arm.get("sl_id") or trade.sl_order_id or "")
+                trade.tp1_order_id = str(arm.get("tp1_id") or "")
+                trade.tp2_order_id = str(arm.get("tp2_id") or "")
+                trade.tp3_order_id = str(arm.get("tp3_id") or "")
+                trade.exits_armed = bool(arm.get("sl_id") and arm.get("any_tp"))
+                log.info(
+                    "Exit ladder re-arm %s: SL=%s TP1=%s TP2=%s TP3=%s armed=%s",
+                    trade.symbol,
+                    bool(arm.get("sl_id")),
+                    bool(arm.get("tp1_id")),
+                    bool(arm.get("tp2_id")),
+                    bool(arm.get("tp3_id")),
+                    trade.exits_armed,
+                )
+            except Exception as e:
+                log.warning("exit ladder re-arm failed: %s", e)
 
         # --- Trail after TP1: structure (higher-lows) + ATR giveback cap ---
         if (
@@ -266,16 +317,23 @@ class MexcExecutor:
                     peak,
                     trail_why,
                 )
-                # Best-effort update exchange SL; soft TP stays TP3 for runners
+                # Re-ladder with higher SL + remaining TP sizes (cancel old, place clean)
                 try:
-                    tp_arm = (
-                        trade.tp3
-                        if trade.allow_runner and trade.tp3 > 0
-                        else trade.tp2
+                    arm = self._arm_full_exits(
+                        trade.symbol,
+                        rem,
+                        sl_px=float(trade.stop),
+                        tp1=float(trade.tp1),
+                        tp2=float(trade.tp2),
+                        tp3=float(trade.tp3),
+                        tp1_done=True,
                     )
-                    self._place_protective(trade.symbol, rem, trade.stop, tp_arm)
+                    trade.sl_order_id = str(arm.get("sl_id") or "")
+                    trade.tp2_order_id = str(arm.get("tp2_id") or "")
+                    trade.tp3_order_id = str(arm.get("tp3_id") or "")
+                    trade.exits_armed = bool(arm.get("sl_id") and arm.get("any_tp"))
                 except Exception as e:
-                    log.debug("trail protective: %s", e)
+                    log.debug("trail SL re-arm: %s", e)
 
         if trade.direction == "LONG" and trade.stop > 0 and px <= trade.stop - buf:
             if self.close_all_remaining(trade):
@@ -338,17 +396,21 @@ class MexcExecutor:
                     trade.stop = max(trade.stop, trade.entry) if trade.stop > 0 else trade.entry
                     trade.trail_peak = max(px, trade.entry)
                     try:
-                        # Runners: soft TP3 so exchange won't full-exit at TP2
-                        tp_arm = (
-                            trade.tp3
-                            if trade.allow_runner and trade.tp3 > 0
-                            else trade.tp2
+                        # Re-arm SL + remaining TP2/TP3 for leftover size
+                        arm = self._arm_full_exits(
+                            trade.symbol,
+                            rem2,
+                            sl_px=float(trade.stop),
+                            tp1=float(trade.tp1),
+                            tp2=float(trade.tp2),
+                            tp3=float(trade.tp3),
+                            tp1_done=True,
                         )
-                        sl_id, tp_id = self._place_protective(
-                            trade.symbol, rem2, trade.stop, tp_arm
-                        )
-                        trade.sl_order_id = sl_id
-                        trade.tp2_order_id = tp_id
+                        trade.sl_order_id = str(arm.get("sl_id") or "")
+                        trade.tp1_order_id = ""
+                        trade.tp2_order_id = str(arm.get("tp2_id") or "")
+                        trade.tp3_order_id = str(arm.get("tp3_id") or "")
+                        trade.exits_armed = bool(arm.get("sl_id") and arm.get("any_tp"))
                     except Exception as e:
                         log.error("TP1 re-arm: %s", e)
                     return "tp1_partial"
@@ -390,6 +452,23 @@ class MexcExecutor:
                             return "tp2_hit"
                         trade.contracts_remaining = rem3
                         trade.trail_peak = max(trade.trail_peak, px)
+                        try:
+                            arm = self._arm_full_exits(
+                                trade.symbol,
+                                rem3,
+                                sl_px=float(trade.stop),
+                                tp1=float(trade.tp1),
+                                tp2=float(trade.tp2),
+                                tp3=float(trade.tp3),
+                                tp1_done=True,
+                                tp2_done=True,
+                            )
+                            trade.sl_order_id = str(arm.get("sl_id") or "")
+                            trade.tp2_order_id = ""
+                            trade.tp3_order_id = str(arm.get("tp3_id") or arm.get("tp2_id") or "")
+                            trade.exits_armed = bool(arm.get("sl_id") and arm.get("any_tp"))
+                        except Exception as e:
+                            log.warning("TP2 runner re-arm: %s", e)
                         log.info("TP2 scale-out runner rem=%s", rem3)
                         return "tp2_partial"
                 # else fall through to full close if can't leave runner
@@ -666,47 +745,325 @@ class MexcExecutor:
         log.info("Size %s: contracts=%s eff_margin≈$%.2f notional≈$%.2f", symbol, qty, eff, qty * csize * price)
         return qty
 
-    def _place_protective(
-        self, symbol: str, qty: float, sl_px: float, tp_px: float
-    ) -> tuple[str, str]:
-        """Place reduce-only conditional SL and TP (backup to attached orders)."""
+    def _min_amt(self, symbol: str) -> float:
         assert self.ex is not None
-        sl_id, tp_id = "", ""
+        try:
+            return float(
+                (self.ex.market(symbol).get("limits") or {})
+                .get("amount", {})
+                .get("min")
+                or 1
+            )
+        except Exception:
+            return 1.0
+
+    def _prec_amt(self, symbol: str, qty: float) -> float:
+        assert self.ex is not None
+        try:
+            return float(self.ex.amount_to_precision(symbol, qty))
+        except Exception:
+            return float(qty)
+
+    def _prec_px(self, symbol: str, px: float) -> float:
+        assert self.ex is not None
+        try:
+            return float(self.ex.price_to_precision(symbol, px))
+        except Exception:
+            return float(px)
+
+    def _split_tp_sizes(
+        self,
+        symbol: str,
+        total: float,
+        tp1_done: bool = False,
+        tp2_done: bool = False,
+    ) -> tuple[float, float, float]:
+        """
+        Split position into TP1/TP2/TP3 lot sizes (sum == total when possible).
+        Whole-contract friendly (X-Perp min often 1).
+        """
+        mn = self._min_amt(symbol)
+        total = self._prec_amt(symbol, total)
+        if total <= 0:
+            return 0.0, 0.0, 0.0
+
+        if tp2_done:
+            # Runner only → full remainder on TP3 (or TP2 if no tp3)
+            return 0.0, 0.0, total
+
+        if tp1_done:
+            # Remaining after TP1: split between TP2 and TP3
+            if total < 2 * mn:
+                return 0.0, total, 0.0
+            f2 = max(
+                0.35,
+                min(
+                    0.65,
+                    config.TP2_SIZE_PCT
+                    / max(1.0, config.TP2_SIZE_PCT + config.TP3_SIZE_PCT),
+                ),
+            )
+            q2 = self._prec_amt(symbol, max(mn, total * f2))
+            if total - q2 < mn:
+                q2 = self._prec_amt(symbol, total - mn)
+            q3 = self._prec_amt(symbol, total - q2)
+            if q3 < mn:
+                return 0.0, total, 0.0
+            return 0.0, q2, q3
+
+        # Full ladder
+        if total < 2 * mn:
+            # Can't partial — single full TP at TP2 (software still tracks TP1/TP3)
+            return 0.0, total, 0.0
+
+        f1 = config.TP1_SIZE_PCT / 100.0
+        f2 = config.TP2_SIZE_PCT / 100.0
+        q1 = self._prec_amt(symbol, max(mn, total * f1))
+        q2 = self._prec_amt(symbol, max(mn, total * f2))
+        # Keep at least mn for runner when possible
+        if q1 + q2 >= total:
+            if total >= 3 * mn:
+                q1 = mn
+                q2 = mn
+            elif total >= 2 * mn:
+                q1 = mn
+                q2 = self._prec_amt(symbol, total - mn)
+                return q1, q2, 0.0
+            else:
+                return 0.0, total, 0.0
+        q3 = self._prec_amt(symbol, total - q1 - q2)
+        if q3 < mn:
+            # Fold runner into TP2
+            q2 = self._prec_amt(symbol, total - q1)
+            q3 = 0.0
+            if q2 < mn:
+                return 0.0, total, 0.0
+        # Final sum check
+        if q3 > 0:
+            q3 = self._prec_amt(symbol, total - q1 - q2)
+            if q3 < mn:
+                q2 = self._prec_amt(symbol, total - q1)
+                q3 = 0.0
+        return q1, q2, q3
+
+    def _cancel_protective_orders(self, symbol: str) -> int:
+        """Cancel open reduce-only / conditional SL-TP algos so we can re-ladder cleanly."""
+        assert self.ex is not None
+        cancelled = 0
+        seen: set[str] = set()
+
+        def _cancel_one(oid: str, params: Optional[dict] = None) -> None:
+            nonlocal cancelled
+            if not oid or oid in seen:
+                return
+            seen.add(oid)
+            try:
+                if params:
+                    self.ex.cancel_order(oid, symbol, params)
+                else:
+                    self.ex.cancel_order(oid, symbol)
+                cancelled += 1
+            except Exception:
+                try:
+                    self.ex.cancel_order(oid, symbol, {"stop": True})
+                    cancelled += 1
+                except Exception as e:
+                    log.debug("cancel %s: %s", oid, e)
+
+        param_sets: list[dict] = [
+            {},
+            {"stop": True},
+            {"trigger": True},
+            {"ordType": "conditional"},
+            {"algoId": True},
+        ]
+        for params in param_sets:
+            try:
+                if params:
+                    orders = self.ex.fetch_open_orders(symbol, params=params)
+                else:
+                    orders = self.ex.fetch_open_orders(symbol)
+            except Exception:
+                continue
+            for o in orders or []:
+                oid = str(o.get("id") or "")
+                side = (o.get("side") or "").lower()
+                # Only cancel sells / reduce-only protective legs
+                reduce = bool((o.get("reduceOnly") is True) or (o.get("info") or {}).get("reduceOnly"))
+                if side in ("sell", "short") or reduce or params:
+                    _cancel_one(oid, params if params else None)
+
+        # OKX native algo pending cancel (X-Perp = FUTURES, global swap = SWAP)
+        for inst_type in ("FUTURES", "SWAP"):
+            try:
+                m = self.ex.market(symbol)
+                inst_id = m.get("id") or ""
+                if not inst_id:
+                    continue
+                resp = self.ex.privateGetTradeOrdersAlgoPending(
+                    {
+                        "instType": inst_type,
+                        "instId": inst_id,
+                        "ordType": "conditional",
+                    }
+                )
+                data = (resp or {}).get("data") or []
+                for row in data:
+                    algo_id = str(row.get("algoId") or "")
+                    if not algo_id:
+                        continue
+                    try:
+                        self.ex.privatePostTradeCancelAlgos(
+                            [{"algoId": algo_id, "instId": inst_id}]
+                        )
+                        cancelled += 1
+                        seen.add(algo_id)
+                    except Exception as e:
+                        log.debug("cancel algo %s: %s", algo_id, e)
+            except Exception as e:
+                log.debug("algo pending %s: %s", inst_type, e)
+
+        if cancelled:
+            log.info("Cancelled %d protective/algo order(s) on %s", cancelled, symbol)
+            time.sleep(0.4)
+        return cancelled
+
+    def _create_sl(self, symbol: str, qty: float, sl_px: float) -> str:
+        assert self.ex is not None
+        q = self._prec_amt(symbol, qty)
+        px = self._prec_px(symbol, sl_px)
+        if q <= 0 or px <= 0:
+            return ""
         try:
             o = self.ex.create_order(
                 symbol,
                 "market",
                 "sell",
-                qty,
+                q,
                 None,
                 {
                     "tdMode": "isolated",
                     "reduceOnly": True,
-                    "stopLossPrice": sl_px,
+                    "stopLossPrice": px,
                     "slTriggerPxType": "last",
                 },
             )
-            sl_id = str(o.get("id") or "sl_ok")
+            return str(o.get("id") or "sl_ok")
         except Exception as e:
-            log.warning("protective SL: %s", e)
+            log.warning("protective SL @ %s qty=%s: %s", px, q, e)
+            return ""
+
+    def _create_tp(self, symbol: str, qty: float, tp_px: float, tag: str = "TP") -> str:
+        assert self.ex is not None
+        q = self._prec_amt(symbol, qty)
+        px = self._prec_px(symbol, tp_px)
+        if q <= 0 or px <= 0:
+            return ""
         try:
             o = self.ex.create_order(
                 symbol,
                 "market",
                 "sell",
-                qty,
+                q,
                 None,
                 {
                     "tdMode": "isolated",
                     "reduceOnly": True,
-                    "takeProfitPrice": tp_px,
+                    "takeProfitPrice": px,
                     "tpTriggerPxType": "last",
                 },
             )
-            tp_id = str(o.get("id") or "tp_ok")
+            oid = str(o.get("id") or f"{tag}_ok")
+            log.info("Armed %s %s qty=%s @ %s id=%s", tag, symbol, q, px, oid)
+            return oid
         except Exception as e:
-            log.warning("protective TP: %s", e)
-        return sl_id, tp_id
+            log.warning("protective %s @ %s qty=%s: %s", tag, px, q, e)
+            return ""
+
+    def _arm_full_exits(
+        self,
+        symbol: str,
+        qty: float,
+        sl_px: float,
+        tp1: float,
+        tp2: float,
+        tp3: float,
+        tp1_done: bool = False,
+        tp2_done: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Place exchange SL (full size) + partial TP1/TP2/TP3 reduce-only legs.
+        Cancels prior protective algos first so the ladder is clean.
+        """
+        assert self.ex is not None
+        out: dict[str, Any] = {
+            "sl_id": "",
+            "tp1_id": "",
+            "tp2_id": "",
+            "tp3_id": "",
+            "any_tp": False,
+            "q1": 0.0,
+            "q2": 0.0,
+            "q3": 0.0,
+            "warnings": [],
+        }
+        if qty <= 0:
+            out["warnings"].append("qty_zero")
+            return out
+
+        self._cancel_protective_orders(symbol)
+
+        q1, q2, q3 = self._split_tp_sizes(
+            symbol, qty, tp1_done=tp1_done, tp2_done=tp2_done
+        )
+        out["q1"], out["q2"], out["q3"] = q1, q2, q3
+
+        # SL covers full remaining position
+        out["sl_id"] = self._create_sl(symbol, qty, sl_px)
+        if not out["sl_id"]:
+            out["warnings"].append("SL_FAILED")
+
+        # TP ladder
+        if not tp1_done and not tp2_done and q1 > 0 and tp1 > 0:
+            out["tp1_id"] = self._create_tp(symbol, q1, tp1, "TP1")
+        if not tp2_done and q2 > 0 and tp2 > 0:
+            out["tp2_id"] = self._create_tp(symbol, q2, tp2, "TP2")
+        if q3 > 0 and tp3 > 0:
+            out["tp3_id"] = self._create_tp(symbol, q3, tp3, "TP3")
+        elif q3 > 0 and tp2 > 0:
+            # no usable tp3 — put remainder on TP2
+            out["tp2_id"] = self._create_tp(symbol, q3 + (q2 if not out["tp2_id"] else 0), tp2, "TP2")
+            out["q2"] = q2 + q3
+            out["q3"] = 0.0
+        elif not out["tp1_id"] and not out["tp2_id"] and not out["tp3_id"] and tp2 > 0:
+            out["tp2_id"] = self._create_tp(symbol, qty, tp2, "TP2")
+
+        out["any_tp"] = bool(out["tp1_id"] or out["tp2_id"] or out["tp3_id"])
+        if not out["any_tp"]:
+            out["warnings"].append("ALL_TP_FAILED")
+
+        log.info(
+            "Exit ladder %s qty=%s SL=%s | TP1=%s@%s | TP2=%s@%s | TP3=%s@%s",
+            symbol,
+            qty,
+            bool(out["sl_id"]),
+            out["q1"],
+            "done" if tp1_done else tp1,
+            out["q2"],
+            "done" if tp2_done else tp2,
+            out["q3"],
+            tp3,
+        )
+        return out
+
+    def _place_protective(
+        self, symbol: str, qty: float, sl_px: float, tp_px: float
+    ) -> tuple[str, str]:
+        """Legacy single SL+TP — prefer _arm_full_exits for multi-TP."""
+        arm = self._arm_full_exits(
+            symbol, qty, sl_px=sl_px, tp1=0, tp2=tp_px, tp3=0, tp1_done=True
+        )
+        return str(arm.get("sl_id") or ""), str(arm.get("tp2_id") or "")
 
     def _position_remaining(self, symbol: str) -> tuple[bool, float]:
         assert self.ex is not None
@@ -830,21 +1187,33 @@ def rehydrate_from_exchange(executor: MexcExecutor) -> Optional[OpenSignal]:
 
 def format_trade_opened(sig: Signal, trade: OpenSignal, warnings: Optional[list] = None) -> str:
     inst = sig.symbol.replace("/USDT:USDT", "-USDT-SWAP").replace("/", "-")
+    q1, q2, q3 = "?", "?", "?"
+    try:
+        # Sizes were computed at arm time; show % targets
+        q1 = f"~{config.TP1_SIZE_PCT}%"
+        q2 = f"~{config.TP2_SIZE_PCT}%"
+        q3 = f"~{config.TP3_SIZE_PCT}%"
+    except Exception:
+        pass
     lines = [
         "🟢 LIVE TRADE OPENED | OKX Oversold Bounce Bot",
         f"Pair: {sig.symbol}",
         f"Direction: LONG",
         f"Fill entry: {_fmt_px(trade.entry)}",
         f"Stop-Loss: {_fmt_px(trade.stop)}",
-        f"TP1 (soft): {_fmt_px(trade.tp1)} (~{config.TP1_SIZE_PCT}%)",
-        f"TP2: {_fmt_px(trade.tp2)}",
+        f"TP1: {_fmt_px(trade.tp1)} ({q1})"
+        + (" ✓" if trade.tp1_order_id else " — check OKX"),
+        f"TP2: {_fmt_px(trade.tp2)} ({q2})"
+        + (" ✓" if trade.tp2_order_id else " — check OKX"),
+        f"TP3: {_fmt_px(trade.tp3)} ({q3})"
+        + (" ✓" if trade.tp3_order_id else " — check OKX"),
         f"Leverage: {trade.leverage}x isolated",
         f"Margin≈ ${trade.margin_usd:.2f} USDC (target ${config.POSITION_SIZE_USD:.0f})",
         f"Contracts: {trade.contracts:g} | Notional≈ ${trade.notional_usd:.2f}",
         f"Confidence: {sig.confidence:.0f}/100",
+        f"Exits armed on OKX: {'YES' if trade.exits_armed else 'PARTIAL/NO — software backup on'}",
         f"Chart: https://www.okx.com/trade-swap/{inst.lower()}",
-        "Margin currency: USDC (OKX multi-ccy). Pair name may still show USDT.",
-        "OKX SL/TP attached + software backup.",
+        "Margin: USDC. Exchange ladder = SL + partial TP1/TP2/TP3 + software backup.",
     ]
     if warnings:
         lines.append("⚠ " + ", ".join(warnings) + " — verify SL/TP on OKX")

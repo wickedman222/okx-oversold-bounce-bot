@@ -41,12 +41,15 @@ class OpenSignal:
     sl_order_id: str = ""
     tp1_order_id: str = ""
     tp2_order_id: str = ""
+    tp3_order_id: str = ""
     tp1_done: bool = False
     auto_trade: bool = False
     # Runner / trail management after TP1
     trail_peak: float = 0.0
     trail_atr: float = 0.0
     allow_runner: bool = False  # high-conf: trail past TP2 instead of full exit
+    # True once SL + partial TPs were placed on the exchange for this position
+    exits_armed: bool = False
 
     def age_hours(self) -> float:
         return (time.time() - self.opened_at) / 3600.0
